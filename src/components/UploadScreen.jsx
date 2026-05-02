@@ -2,17 +2,11 @@ import { useRef, useState } from 'react';
 import { LAYER_COLORS } from '../hooks/usePipeline';
 import styles from './UploadScreen.module.css';
 
-interface Props {
-  numLayers: number;
-  setNumLayers: (n: number) => void;
-  onFile: (file: File, img: HTMLImageElement) => void;
-}
-
-export function UploadScreen({ numLayers, setNumLayers, onFile }: Props) {
-  const fileRef = useRef<HTMLInputElement>(null);
+export function UploadScreen({ numLayers, setNumLayers, onFile }) {
+  const fileRef = useRef(null);
   const [dragging, setDragging] = useState(false);
 
-  function handleFile(file: File | undefined) {
+  function handleFile(file) {
     if (!file?.type.startsWith('image/')) return;
     const url = URL.createObjectURL(file);
     const img = new Image();
@@ -50,13 +44,7 @@ export function UploadScreen({ numLayers, setNumLayers, onFile }: Props) {
           <div className={styles.layerBlockLabel}>Quantas layers no seu parallax?</div>
           <div className={styles.numRow}>
             {[2,3,4,5,6,7,8].map(n => (
-              <button
-                key={n}
-                className={`${styles.numBtn} ${numLayers === n ? styles.numBtnOn : ''}`}
-                onClick={() => setNumLayers(n)}
-              >
-                {n}
-              </button>
+              <button key={n} className={`${styles.numBtn} ${numLayers === n ? styles.numBtnOn : ''}`} onClick={() => setNumLayers(n)}>{n}</button>
             ))}
           </div>
           <div className={styles.swatchRow}>
@@ -71,18 +59,12 @@ export function UploadScreen({ numLayers, setNumLayers, onFile }: Props) {
 
         <div
           className={`${styles.drop} ${dragging ? styles.dropOn : ''}`}
-          onClick={() => fileRef.current?.click()}
+          onClick={() => fileRef.current.click()}
           onDragOver={e => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
           onDrop={e => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files[0]); }}
         >
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/*"
-            style={{ display: 'none' }}
-            onChange={e => handleFile(e.target.files?.[0])}
-          />
+          <input ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={e => handleFile(e.target.files[0])} />
           <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
             <circle cx="20" cy="20" r="19" stroke="#5eead420" strokeWidth="1.5"/>
             <path d="M20 13v14M13 20h14" stroke="#5eead460" strokeWidth="2" strokeLinecap="round"/>

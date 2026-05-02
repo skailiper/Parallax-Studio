@@ -4,13 +4,7 @@ import { createProject, updateProjectStatus, saveProjectLayers, logProcessingEve
 import { getSessionId } from '../lib/session';
 import { withRetry } from '../lib/retry';
 
-export interface LayerColor {
-  hex: string;
-  name: string;
-  rgb: [number, number, number];
-}
-
-export const LAYER_COLORS: LayerColor[] = [
+export const LAYER_COLORS = [
   { hex: '#FF3D5A', name: 'Layer 1', rgb: [255, 61, 90]   },
   { hex: '#00E5FF', name: 'Layer 2', rgb: [0, 229, 255]   },
   { hex: '#AAFF00', name: 'Layer 3', rgb: [170, 255, 0]   },
@@ -21,67 +15,39 @@ export const LAYER_COLORS: LayerColor[] = [
   { hex: '#FF6BCA', name: 'Layer 8', rgb: [255, 107, 202] },
 ];
 
-export type LogType = 'info' | 'success' | 'ai' | 'warn' | 'error';
-
-export interface LogEntry {
-  id: number;
-  msg: string;
-  type: LogType;
-}
-
-export interface ProcessedLayer {
-  index: number;
-  label: string;
-  color: string;
-  elements: string[];
-  cutoutDataURL: string;
-  inpaintedDataURL: string | null;
-  hasInpaint: boolean;
-}
-
-export type Phase = 'idle' | 'running' | 'done' | 'error';
-
-async function callClaude(body: object): Promise<string> {
+async function callClaude(body) {
   const res = await fetch('/api/claude', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Claude error');
-  return (data.content as Array<{ text?: string }>).map(b => b.text || '').join('').replace(/```json|```/g, '').trim();
+  return data.content.map(b => b.text || '').join('').replace(/```json|```/g, '').trim();
 }
 
-async function callStability(body: object): Promise<string> {
+async function callStability(body) {
   const res = await fetch('/api/stability', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Stability error');
   return `data:image/png;base64,${data.imageBase64}`;
 }
 
-function retryOpts(addLog: (msg: string, type: LogType) => void, label: string) {
+function retryOpts(addLog, label) {
   return {
     attempts: 3,
     baseDelayMs: 1000,
-    onRetry: (err: Error, attempt: number) => addLog(`⟳ ${label} — tentativa ${attempt + 1}/3: ${err.message}`, 'warn'),
+    onRetry: (err, attempt) => addLog(`⟳ ${label} — tentativa ${attempt + 1}/3: ${err.message}`, 'warn'),
   };
 }
 
 export function usePipeline() {
-  const [logs,     setLogs]     = useState<LogEntry[]>([]);
+  const [logs,     setLogs]     = useState([]);
   const [progress, setProgress] = useState(0);
-  const [phase,    setPhase]    = useState<Phase>('idle');
+  const [phase,    setPhase]    = useState('idle');
+  const addLog = useCallback((msg, type = 'info') => setLogs(p => [...p, { msg, type, id: Date.now() + Math.random() }]), []);
 
-  const addLog = useCallback((msg: string, type: LogType = 'info') =>
-    setLogs(p => [...p, { msg, type, id: Date.now() + Math.random() }]), []);
-
-  const run = useCallback(async (params: {
-    imgEl: React.RefObject<HTMLImageElement>;
-    maskRefs: HTMLCanvasElement[];
-    numLayers: number;
-    imgFile: File;
-  }): Promise<ProcessedLayer[]> => {
-    const { imgEl, maskRefs, numLayers, imgFile } = params;
+  const run = useCallback(async ({ imgEl, maskRefs, numLayers, imgFile }) => {
     setPhase('running'); setLogs([]); setProgress(0);
     const sessionId = getSessionId();
-    const W = imgEl.current!.naturalWidth, H = imgEl.current!.naturalHeight;
-    let projectId: string | null = null;
+    const W = imgEl.current.naturalWidth, H = imgEl.current.naturalHeight;
+    let projectId = null;
     try {
       const project = await createProject({ sessionId, numLayers, imageFilename: imgFile.name, imageSizeBytes: imgFile.size });
       projectId = project.id;
@@ -89,11 +55,11 @@ export function usePipeline() {
 
     try {
       addLog('🔍 Claude analisando cena e esboços…', 'ai');
-      const { canvas: thumb, w: tw, h: th } = resizeToFit(imgEl.current!, 800);
+      const { canvas: thumb, w: tw, h: th } = resizeToFit(imgEl.current, 800);
       const origB64   = canvasToJpeg(thumb, 0.85);
-      const sketchB64 = canvasToJpeg(buildSketchOverlay(imgEl.current!, maskRefs, numLayers, LAYER_COLORS, tw, th), 0.85);
+      const sketchB64 = canvasToJpeg(buildSketchOverlay(imgEl.current, maskRefs, numLayers, LAYER_COLORS, tw, th), 0.85);
 
-      let analysis: any = null;
+      let analysis = null;
       try {
         const raw = await withRetry(() => callClaude({ model: 'claude-sonnet-4-20250514', max_tokens: 3000, messages: [{ role: 'user', content: [
           { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: origB64 } },
@@ -107,18 +73,18 @@ export function usePipeline() {
       } catch { addLog('⚠️ Análise parcial', 'warn'); analysis = { imageStyle: 'photograph', scene: '', mood: '', layers: [] }; }
       setProgress(12);
 
-      const cutouts: Array<{ index: number; cutoutCanvas: HTMLCanvasElement; layerInfo: any } | null> = [];
+      const cutouts = [];
       for (let i = 0; i < numLayers; i++) {
-        const li = analysis.layers?.find((l: any) => l.index === i) || {};
+        const li = analysis.layers?.find(l => l.index === i) || {};
         addLog(`✂️ Recortando Layer ${i+1}${li.elements?.length ? ` — ${li.elements.join(', ')}` : ''} …`, 'ai');
-        const sd = maskRefs[i].getContext('2d')!.getImageData(0, 0, W, H);
+        const sd = maskRefs[i].getContext('2d').getImageData(0, 0, W, H);
         let painted = false;
         for (let p = 3; p < sd.data.length; p += 4) if (sd.data[p] > 10) { painted = true; break; }
         if (!painted) { addLog(`⚪ Layer ${i+1} sem pintura, pulando`, 'warn'); cutouts.push(null); continue; }
 
-        const mt = createCanvas(tw, th); mt.getContext('2d')!.drawImage(maskRefs[i], 0, 0, tw, th);
+        const mt = createCanvas(tw, th); mt.getContext('2d').drawImage(maskRefs[i], 0, 0, tw, th);
         const mb64 = canvasToJpeg(mt, 0.75);
-        let seg: any = null;
+        let seg = null;
         try {
           const sr = await withRetry(() => callClaude({ model: 'claude-sonnet-4-20250514', max_tokens: 1200, messages: [{ role: 'user', content: [
             { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: origB64 } },
@@ -126,25 +92,25 @@ export function usePipeline() {
             { type: 'text', text: `Img1: original ${W}x${H}. Img2: brush for L${i+1}. Elements:${(li.elements || []).join(',')}. Style:${analysis.imageStyle}. Respond ONLY JSON: {"objects":[{"label":"name","x1pct":0,"y1pct":0,"x2pct":100,"y2pct":100,"softness":12,"priority":1.0}],"featherPx":14,"expansionFactor":2.4}` },
           ]}] }), retryOpts(addLog, `Segmentação L${i+1}`));
           seg = JSON.parse(sr);
-          addLog(`   📐 ${seg.objects?.map((o: any) => o.label).join(', ') || 'mapeado'}`, 'info');
+          addLog(`   📐 ${seg.objects?.map(o => o.label).join(', ') || 'mapeado'}`, 'info');
         } catch { addLog(`   ⚠️ Segmentação base para L${i+1}`, 'warn'); }
 
         let alphaMap = expandStrokeToAlphaMap(sd, W, H, 36, seg?.expansionFactor || 2.3);
         if (seg?.objects?.length) alphaMap = applyBBoxesToAlphaMap(alphaMap, seg.objects, W, H);
-        cutouts.push({ index: i, cutoutCanvas: buildCutout(imgEl.current!, W, H, alphaMap), layerInfo: li });
+        cutouts.push({ index: i, cutoutCanvas: buildCutout(imgEl.current, W, H, alphaMap), layerInfo: li });
         setProgress(12 + Math.round(((i + 1) / numLayers) * 33));
         addLog(`   ✅ Layer ${i+1} recortada`, 'success');
-        await new Promise<void>(r => setTimeout(r, 20));
+        await new Promise(r => setTimeout(r, 20));
       }
 
       setProgress(46);
       if (projectId) await updateProjectStatus(projectId, 'inpainting');
       addLog('🎨 Stability AI preenchendo áreas removidas…', 'ai');
 
-      const { canvas: stableCanvas } = resizeToStability(imgEl.current!);
+      const { canvas: stableCanvas } = resizeToStability(imgEl.current);
       const stableW = stableCanvas.width, stableH = stableCanvas.height;
       const stableB64 = canvasToPng(stableCanvas);
-      const results: Array<ProcessedLayer | null> = [];
+      const results = [];
 
       for (let i = 0; i < cutouts.length; i++) {
         const co = cutouts[i];
@@ -152,11 +118,11 @@ export function usePipeline() {
         addLog(`🖌️ Stability AI: Layer ${i+1}…`, 'ai');
         const mFull = buildInpaintMask(maskRefs, i, W, H);
         const mResized = createCanvas(stableW, stableH);
-        mResized.getContext('2d')!.drawImage(mFull, 0, 0, stableW, stableH);
-        const md = mResized.getContext('2d')!.getImageData(0, 0, stableW, stableH);
+        mResized.getContext('2d').drawImage(mFull, 0, 0, stableW, stableH);
+        const md = mResized.getContext('2d').getImageData(0, 0, stableW, stableH);
         let hasArea = false;
         for (let p = 0; p < md.data.length; p += 4) if (md.data[p] > 128) { hasArea = true; break; }
-        let inpaintedDataURL: string | null = null;
+        let inpaintedDataURL = null;
         if (hasArea) {
           try {
             inpaintedDataURL = await withRetry(() => callStability({
@@ -167,23 +133,19 @@ export function usePipeline() {
               steps: 40,
             }), retryOpts(addLog, `Inpainting L${i+1}`));
             addLog(`   ✅ Layer ${i+1} preenchida`, 'success');
-          } catch (e: any) { addLog(`   ⚠️ ${e.message}`, 'warn'); }
+          } catch (e) { addLog(`   ⚠️ ${e.message}`, 'warn'); }
         } else { addLog(`   Layer ${i+1}: sem área para preencher`, 'info'); }
 
         results.push({
-          index: i,
-          label: `Layer ${i+1}`,
-          color: LAYER_COLORS[i].hex,
-          elements: co.layerInfo?.elements || [],
-          cutoutDataURL: co.cutoutCanvas.toDataURL('image/png'),
-          inpaintedDataURL,
-          hasInpaint: !!inpaintedDataURL,
+          index: i, label: `Layer ${i+1}`, color: LAYER_COLORS[i].hex,
+          elements: co.layerInfo?.elements || [], cutoutDataURL: co.cutoutCanvas.toDataURL('image/png'),
+          inpaintedDataURL, hasInpaint: !!inpaintedDataURL,
         });
         setProgress(46 + Math.round(((i + 1) / numLayers) * 46));
-        await new Promise<void>(r => setTimeout(r, 80));
+        await new Promise(r => setTimeout(r, 80));
       }
 
-      const finalResults = results.filter(Boolean) as ProcessedLayer[];
+      const finalResults = results.filter(Boolean);
       if (projectId && finalResults.length) {
         try {
           await saveProjectLayers(projectId, finalResults);
@@ -194,7 +156,7 @@ export function usePipeline() {
       addLog(`🎉 ${finalResults.length} layers prontas!`, 'success');
       setPhase('done');
       return finalResults;
-    } catch (e: any) {
+    } catch (e) {
       addLog(`❌ Erro: ${e.message}`, 'error');
       if (projectId) await updateProjectStatus(projectId, 'error', { error_message: e.message }).catch(() => {});
       setPhase('error');

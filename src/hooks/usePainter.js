@@ -1,24 +1,15 @@
-import { useState, useRef, useEffect, useCallback, RefObject } from 'react';
+import { useRef, useEffect, useCallback } from 'react';
 import { createCanvas } from '../lib/canvas';
 import { LAYER_COLORS } from './usePipeline';
 
-interface UsePainterOptions {
-  numLayers: number;
-  activeLayer: number;
-  tool: 'brush' | 'eraser';
-  brushSize: number;
-  layerVis: boolean[];
-  showOrig: boolean;
-}
-
-export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, showOrig }: UsePainterOptions) {
-  const canvasRef  = useRef<HTMLCanvasElement>(null);
-  const maskRefs   = useRef<HTMLCanvasElement[]>([]);
-  const imgEl      = useRef<HTMLImageElement | null>(null);
+export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, showOrig }) {
+  const canvasRef  = useRef(null);
+  const maskRefs   = useRef([]);
+  const imgEl      = useRef(null);
   const isPainting = useRef(false);
-  const lastPt     = useRef<{ x: number; y: number } | null>(null);
+  const lastPt     = useRef(null);
 
-  const initMasks = useCallback((img: HTMLImageElement) => {
+  const initMasks = useCallback((img) => {
     imgEl.current = img;
     const W = img.naturalWidth, H = img.naturalHeight;
     maskRefs.current = Array.from({ length: 8 }, () => createCanvas(W, H));
@@ -28,7 +19,7 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
   const renderComposite = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas || !imgEl.current) return;
-    const ctx = canvas.getContext('2d')!;
+    const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height;
     ctx.clearRect(0, 0, W, H);
     ctx.drawImage(imgEl.current, 0, 0, W, H);
@@ -37,7 +28,7 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
       if (!layerVis[i]) continue;
       const mask = maskRefs.current[i]; if (!mask) continue;
       const tmp = createCanvas(W, H);
-      const tCtx = tmp.getContext('2d')!;
+      const tCtx = tmp.getContext('2d');
       tCtx.drawImage(mask, 0, 0, W, H);
       const td = tCtx.getImageData(0, 0, W, H);
       const [r, g, b] = LAYER_COLORS[i].rgb;
@@ -50,18 +41,18 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
 
   useEffect(() => { renderComposite(); }, [layerVis, showOrig, renderComposite]);
 
-  function getPos(e: React.MouseEvent | React.TouchEvent): { x: number; y: number } {
-    const canvas = canvasRef.current!;
+  function getPos(e) {
+    const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
     const sx = canvas.width / rect.width, sy = canvas.height / rect.height;
-    const cx = 'touches' in e ? e.touches[0].clientX : e.clientX;
-    const cy = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
     return { x: (cx - rect.left) * sx, y: (cy - rect.top) * sy };
   }
 
-  function paintAt(x: number, y: number) {
+  function paintAt(x, y) {
     const mask = maskRefs.current[activeLayer]; if (!mask) return;
-    const ctx = mask.getContext('2d')!;
+    const ctx = mask.getContext('2d');
     if (tool === 'brush') {
       const [r, g, b] = LAYER_COLORS[activeLayer].rgb;
       ctx.globalCompositeOperation = 'source-over';
@@ -75,12 +66,8 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
     }
   }
 
-  function onDown(e: React.MouseEvent | React.TouchEvent) {
-    e.preventDefault(); isPainting.current = true;
-    const pt = getPos(e); lastPt.current = pt; paintAt(pt.x, pt.y); renderComposite();
-  }
-
-  function onMove(e: React.MouseEvent | React.TouchEvent) {
+  function onDown(e) { e.preventDefault(); isPainting.current = true; const pt = getPos(e); lastPt.current = pt; paintAt(pt.x, pt.y); renderComposite(); }
+  function onMove(e) {
     e.preventDefault(); if (!isPainting.current) return;
     const pt = getPos(e);
     if (lastPt.current) {
@@ -90,19 +77,9 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
     }
     lastPt.current = pt; renderComposite();
   }
-
   function onUp() { isPainting.current = false; lastPt.current = null; }
-
-  function clearLayer(i: number) {
-    const m = maskRefs.current[i];
-    if (m) m.getContext('2d')!.clearRect(0, 0, m.width, m.height);
-    renderComposite();
-  }
-
-  function clearAll() {
-    maskRefs.current.forEach(m => m?.getContext('2d')!.clearRect(0, 0, m.width, m.height));
-    renderComposite();
-  }
+  function clearLayer(i) { const m = maskRefs.current[i]; if (m) m.getContext('2d').clearRect(0, 0, m.width, m.height); renderComposite(); }
+  function clearAll() { maskRefs.current.forEach(m => m?.getContext('2d').clearRect(0, 0, m.width, m.height)); renderComposite(); }
 
   return { canvasRef, maskRefs, imgEl, initMasks, renderComposite, onDown, onMove, onUp, clearLayer, clearAll };
 }

@@ -1,53 +1,39 @@
-import type { LayerColor } from '../hooks/usePipeline';
-
-export function canvasToJpeg(canvas: HTMLCanvasElement, quality = 0.85): string {
+export function canvasToJpeg(canvas, quality = 0.85) {
   return canvas.toDataURL('image/jpeg', quality).split(',')[1];
 }
-
-export function canvasToPng(canvas: HTMLCanvasElement): string {
+export function canvasToPng(canvas) {
   return canvas.toDataURL('image/png').split(',')[1];
 }
-
-export function createCanvas(w: number, h: number): HTMLCanvasElement {
+export function createCanvas(w, h) {
   const c = document.createElement('canvas');
   c.width = w; c.height = h; return c;
 }
-
-export function resizeToFit(img: HTMLImageElement, maxPx = 900): { canvas: HTMLCanvasElement; w: number; h: number; scale: number } {
+export function resizeToFit(img, maxPx = 900) {
   const scale = Math.min(1, maxPx / Math.max(img.naturalWidth, img.naturalHeight));
   const w = Math.round(img.naturalWidth * scale), h = Math.round(img.naturalHeight * scale);
   const c = createCanvas(w, h);
-  c.getContext('2d')!.drawImage(img, 0, 0, w, h);
+  c.getContext('2d').drawImage(img, 0, 0, w, h);
   return { canvas: c, w, h, scale };
 }
-
-export function resizeToStability(img: HTMLImageElement): { canvas: HTMLCanvasElement; w: number; h: number } {
+export function resizeToStability(img) {
   const maxPx = 1024;
   const scale = Math.min(1, maxPx / Math.max(img.naturalWidth, img.naturalHeight));
   const w = Math.round(img.naturalWidth * scale / 64) * 64;
   const h = Math.round(img.naturalHeight * scale / 64) * 64;
   const c = createCanvas(w, h);
-  c.getContext('2d')!.drawImage(img, 0, 0, w, h);
+  c.getContext('2d').drawImage(img, 0, 0, w, h);
   return { canvas: c, w, h };
 }
-
-export function buildSketchOverlay(
-  img: HTMLImageElement,
-  maskCanvases: HTMLCanvasElement[],
-  numLayers: number,
-  colors: LayerColor[],
-  tw: number,
-  th: number,
-): HTMLCanvasElement {
+export function buildSketchOverlay(img, maskCanvases, numLayers, COLORS, tw, th) {
   const c = createCanvas(tw, th);
-  const ctx = c.getContext('2d')!;
+  const ctx = c.getContext('2d');
   ctx.drawImage(img, 0, 0, tw, th);
   for (let i = 0; i < numLayers; i++) {
     const tmp = createCanvas(tw, th);
-    const tCtx = tmp.getContext('2d')!;
+    const tCtx = tmp.getContext('2d');
     tCtx.drawImage(maskCanvases[i], 0, 0, tw, th);
     const td = tCtx.getImageData(0, 0, tw, th);
-    const [r, g, b] = colors[i].rgb;
+    const [r, g, b] = COLORS[i].rgb;
     for (let p = 0; p < td.data.length; p += 4)
       if (td.data[p + 3] > 0) { td.data[p]=r; td.data[p+1]=g; td.data[p+2]=b; td.data[p+3]=200; }
     tCtx.putImageData(td, 0, 0);
@@ -55,20 +41,19 @@ export function buildSketchOverlay(
   }
   return c;
 }
-
-export function buildInpaintMask(maskCanvases: HTMLCanvasElement[], layerIdx: number, W: number, H: number): HTMLCanvasElement {
+export function buildInpaintMask(maskCanvases, layerIdx, W, H) {
   const c = createCanvas(W, H);
-  const ctx = c.getContext('2d')!;
+  const ctx = c.getContext('2d');
   ctx.fillStyle = 'black'; ctx.fillRect(0, 0, W, H);
   for (let j = 0; j < layerIdx; j++) {
-    const mData = maskCanvases[j].getContext('2d')!.getImageData(0, 0, W, H);
+    const mData = maskCanvases[j].getContext('2d').getImageData(0, 0, W, H);
     const iData = ctx.getImageData(0, 0, W, H);
     for (let p = 0; p < mData.data.length; p += 4)
       if (mData.data[p + 3] > 30) { iData.data[p]=255; iData.data[p+1]=255; iData.data[p+2]=255; iData.data[p+3]=255; }
     ctx.putImageData(iData, 0, 0);
   }
   const fc = createCanvas(W, H);
-  const fCtx = fc.getContext('2d')!;
+  const fCtx = fc.getContext('2d');
   fCtx.filter = 'blur(10px)'; fCtx.drawImage(c, 0, 0); fCtx.filter = 'none';
   const fd = fCtx.getImageData(0, 0, W, H);
   for (let p = 0; p < fd.data.length; p += 4) {
@@ -78,10 +63,9 @@ export function buildInpaintMask(maskCanvases: HTMLCanvasElement[], layerIdx: nu
   fCtx.putImageData(fd, 0, 0);
   return fc;
 }
-
-export function buildCutout(img: HTMLImageElement, W: number, H: number, alphaMap: Float32Array): HTMLCanvasElement {
+export function buildCutout(img, W, H, alphaMap) {
   const c = createCanvas(W, H);
-  const ctx = c.getContext('2d')!;
+  const ctx = c.getContext('2d');
   ctx.drawImage(img, 0, 0);
   const d = ctx.getImageData(0, 0, W, H);
   for (let p = 0; p < d.data.length; p += 4)
@@ -89,8 +73,7 @@ export function buildCutout(img: HTMLImageElement, W: number, H: number, alphaMa
   ctx.putImageData(d, 0, 0);
   return c;
 }
-
-export function expandStrokeToAlphaMap(strokeData: ImageData, W: number, H: number, brushSize: number, expansionFactor = 2.2): Float32Array {
+export function expandStrokeToAlphaMap(strokeData, W, H, brushSize, expansionFactor = 2.2) {
   const base = new Float32Array(W * H);
   for (let p = 3; p < strokeData.data.length; p += 4) base[(p - 3) / 4] = strokeData.data[p] / 255;
   const radius = brushSize * expansionFactor;
@@ -108,13 +91,7 @@ export function expandStrokeToAlphaMap(strokeData: ImageData, W: number, H: numb
   }
   return result;
 }
-
-export interface BBox {
-  x1pct: number; y1pct: number; x2pct: number; y2pct: number;
-  softness?: number; priority?: number;
-}
-
-export function applyBBoxesToAlphaMap(alphaMap: Float32Array, bboxes: BBox[], W: number, H: number): Float32Array {
+export function applyBBoxesToAlphaMap(alphaMap, bboxes, W, H) {
   for (const obj of bboxes) {
     const x1=Math.round(obj.x1pct/100*W), y1=Math.round(obj.y1pct/100*H);
     const x2=Math.round(obj.x2pct/100*W), y2=Math.round(obj.y2pct/100*H);

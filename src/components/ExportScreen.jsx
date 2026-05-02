@@ -1,31 +1,24 @@
 import { useState } from 'react';
 import { trackUsage } from '../lib/supabase';
 import { getSessionId } from '../lib/session';
-import { ProcessedLayer } from '../hooks/usePipeline';
 import styles from './ExportScreen.module.css';
 
-interface Props {
-  layers: ProcessedLayer[];
-  onEdit: () => void;
-  onNew:  () => void;
-}
+const TIPS = [
+  { label: 'Layer frontal',  speed: '×1.8 – ×2.0', color: '#f87171' },
+  { label: 'Layers do meio', speed: '×0.8 – ×1.2', color: '#fbbf24' },
+  { label: 'Fundo',          speed: '×0.3 – ×0.5', color: '#5eead4' },
+];
 
 function Checker() {
   return <div className={styles.checker} />;
 }
 
-const TIPS = [
-  { label: 'Layer frontal',   speed: '×1.8 – ×2.0', color: '#f87171' },
-  { label: 'Layers do meio',  speed: '×0.8 – ×1.2', color: '#fbbf24' },
-  { label: 'Fundo',           speed: '×0.3 – ×0.5', color: '#5eead4' },
-];
-
-export function ExportScreen({ layers, onEdit, onNew }: Props) {
+export function ExportScreen({ layers, onEdit, onNew }) {
   const [downloading, setDownloading] = useState(false);
 
-  function dl(layer: ProcessedLayer, type: 'cutout' | 'inpainted' = 'cutout') {
+  function dl(layer, type = 'cutout') {
     const a = document.createElement('a');
-    a.href     = type === 'cutout' ? layer.cutoutDataURL : (layer.inpaintedDataURL ?? '');
+    a.href     = type === 'cutout' ? layer.cutoutDataURL : layer.inpaintedDataURL;
     a.download = `parallax-L${layer.index+1}-${type}.png`;
     a.click();
     trackUsage({ sessionId: getSessionId(), action: 'download_layer', meta: { layerIndex: layer.index, type } });
@@ -70,7 +63,6 @@ export function ExportScreen({ layers, onEdit, onNew }: Props) {
           {layers.map(l => (
             <div key={l.index} className={styles.card}>
               <div className={styles.cardBadge} style={{ background: l.color }}>L{l.index+1}</div>
-
               <div className={styles.thumbWrap}>
                 <Checker />
                 <img src={l.cutoutDataURL} alt={l.label} className={styles.thumb} />
@@ -79,22 +71,18 @@ export function ExportScreen({ layers, onEdit, onNew }: Props) {
                 <span className={styles.thumbLabel}>Recorte transparente</span>
                 <button className={styles.dlBtn} onClick={() => dl(l, 'cutout')}>⬇ PNG</button>
               </div>
-
               {l.hasInpaint && <>
                 <div className={styles.sep} />
                 <div className={styles.thumbWrap}>
                   <Checker />
-                  <img src={l.inpaintedDataURL ?? ''} alt="" className={styles.thumb} />
+                  <img src={l.inpaintedDataURL} alt="" className={styles.thumb} />
                 </div>
                 <div className={styles.thumbMeta}>
                   <span className={styles.thumbLabel}>Com fundo gerado</span>
                   <button className={`${styles.dlBtn} ${styles.dlBtnGreen}`} onClick={() => dl(l, 'inpainted')}>⬇ PNG</button>
                 </div>
               </>}
-
-              {l.elements.length > 0 && (
-                <div className={styles.elements}>{l.elements.slice(0, 3).join(' · ')}</div>
-              )}
+              {l.elements?.length > 0 && <div className={styles.elements}>{l.elements.slice(0, 3).join(' · ')}</div>}
             </div>
           ))}
         </div>

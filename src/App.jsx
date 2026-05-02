@@ -10,21 +10,21 @@ import { getSessionId }     from './lib/session';
 import styles from './App.module.css';
 
 export default function App() {
-  const [screen,       setScreen]       = useState<'upload'|'paint'|'processing'|'export'>('upload');
-  const [imgFile,      setImgFile]      = useState<File | null>(null);
+  const [screen,       setScreen]       = useState('upload');
+  const [imgFile,      setImgFile]      = useState(null);
   const [numLayers,    setNumLayers]    = useState(3);
   const [activeLayer,  setActiveLayer]  = useState(0);
-  const [tool,         setTool]         = useState<'brush'|'eraser'>('brush');
+  const [tool,         setTool]         = useState('brush');
   const [brushSize,    setBrushSize]    = useState(36);
-  const [layerVis,     setLayerVis]     = useState<boolean[]>(Array(8).fill(true));
+  const [layerVis,     setLayerVis]     = useState(Array(8).fill(true));
   const [showOrig,     setShowOrig]     = useState(false);
   const [zoom,         setZoom]         = useState(1);
-  const [exportLayers, setExportLayers] = useState<any[]>([]);
+  const [exportLayers, setExportLayers] = useState([]);
 
   const { run, logs, progress, phase, setPhase } = usePipeline();
   const painter = usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, showOrig });
 
-  function handleFile(file: File, img: HTMLImageElement) {
+  function handleFile(file, img) {
     setImgFile(file);
     painter.initMasks(img);
     setScreen('paint');
@@ -34,7 +34,7 @@ export default function App() {
   async function handleProcess() {
     setScreen('processing');
     setPhase('running');
-    const results = await run({ imgEl: painter.imgEl, maskRefs: painter.maskRefs.current, numLayers, imgFile: imgFile! });
+    const results = await run({ imgEl: painter.imgEl, maskRefs: painter.maskRefs.current, numLayers, imgFile });
     if (results.length > 0) { setExportLayers(results); setScreen('export'); }
     else setScreen('paint');
   }
@@ -49,7 +49,7 @@ export default function App() {
   return (
     <div className={styles.root}>
       {screen === 'upload'     && <UploadScreen numLayers={numLayers} setNumLayers={setNumLayers} onFile={handleFile} />}
-      {screen === 'paint'      && <PaintScreen imgFile={imgFile!} imgEl={painter.imgEl} numLayers={numLayers} activeLayer={activeLayer} setActiveLayer={setActiveLayer} tool={tool} setTool={setTool} brushSize={brushSize} setBrushSize={setBrushSize} layerVis={layerVis} setLayerVis={setLayerVis} showOrig={showOrig} setShowOrig={setShowOrig} zoom={zoom} setZoom={setZoom} canvasRef={painter.canvasRef} onDown={painter.onDown} onMove={painter.onMove} onUp={painter.onUp} clearLayer={painter.clearLayer} onProcess={handleProcess} />}
+      {screen === 'paint'      && <PaintScreen imgFile={imgFile} imgEl={painter.imgEl} numLayers={numLayers} activeLayer={activeLayer} setActiveLayer={setActiveLayer} tool={tool} setTool={setTool} brushSize={brushSize} setBrushSize={setBrushSize} layerVis={layerVis} setLayerVis={setLayerVis} showOrig={showOrig} setShowOrig={setShowOrig} zoom={zoom} setZoom={setZoom} canvasRef={painter.canvasRef} onDown={painter.onDown} onMove={painter.onMove} onUp={painter.onUp} clearLayer={painter.clearLayer} onProcess={handleProcess} />}
       {screen === 'processing' && <ProcessingScreen logs={logs} progress={progress} />}
       {screen === 'export'     && <ExportScreen layers={exportLayers} onEdit={handleEdit} onNew={handleNew} />}
     </div>

@@ -1,4 +1,4 @@
-export function getSessionId(): string {
+export function getSessionId() {
   const key = 'parallax_session_id';
   let id = localStorage.getItem(key);
   if (!id) {

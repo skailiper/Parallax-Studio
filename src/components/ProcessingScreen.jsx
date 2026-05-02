@@ -1,5 +1,4 @@
 import { useEffect, useRef } from 'react';
-import { LogEntry, LogType } from '../hooks/usePipeline';
 import styles from './ProcessingScreen.module.css';
 
 const STAGES = [
@@ -9,7 +8,7 @@ const STAGES = [
   { label: 'Finalização',                min: 94, max: 100 },
 ];
 
-const LOG_CLASS: Record<LogType, string> = {
+const LOG_CLASS = {
   success: styles.logSuccess,
   ai:      styles.logAi,
   warn:    styles.logWarn,
@@ -17,15 +16,9 @@ const LOG_CLASS: Record<LogType, string> = {
   info:    styles.logInfo,
 };
 
-interface Props {
-  logs: LogEntry[];
-  progress: number;
-}
-
-export function ProcessingScreen({ logs, progress }: Props) {
-  const logsEndRef = useRef<HTMLDivElement>(null);
+export function ProcessingScreen({ logs, progress }) {
+  const logsEndRef = useRef(null);
   useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
-
   const cur = STAGES.findIndex(s => progress >= s.min && progress < s.max);
 
   return (
@@ -34,15 +27,10 @@ export function ProcessingScreen({ logs, progress }: Props) {
         <div className={styles.logoAnim}>
           <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
             <circle cx="24" cy="24" r="22" stroke="#5eead415" strokeWidth="2"/>
-            <circle
-              cx="24" cy="24" r="22"
-              stroke="#5eead4" strokeWidth="2"
-              strokeDasharray="138.2"
-              strokeDashoffset={138.2 * (1 - progress / 100)}
-              strokeLinecap="round"
-              transform="rotate(-90 24 24)"
-              style={{ transition: 'stroke-dashoffset .5s ease' }}
-            />
+            <circle cx="24" cy="24" r="22" stroke="#5eead4" strokeWidth="2"
+              strokeDasharray="138.2" strokeDashoffset={138.2 * (1 - progress / 100)}
+              strokeLinecap="round" transform="rotate(-90 24 24)"
+              style={{ transition: 'stroke-dashoffset .5s ease' }}/>
           </svg>
           <div className={styles.logoInner}>
             <svg width="22" height="22" viewBox="0 0 28 28" fill="none">
@@ -63,23 +51,15 @@ export function ProcessingScreen({ logs, progress }: Props) {
 
         <div className={styles.stages}>
           {STAGES.map((st, i) => {
-            const done   = progress >= st.max;
-            const active = i === cur;
+            const done = progress >= st.max, active = i === cur;
             return (
               <div key={i} className={styles.stage} style={{ opacity: done || active ? 1 : 0.22 }}>
                 <div className={`${styles.stageDot} ${done ? styles.stageDotDone : active ? styles.stageDotActive : ''}`}>
                   {done
                     ? <svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 5l2.5 2.5L8 3" stroke="#020e0c" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                    : active
-                      ? <div className={styles.stagePulse} />
-                      : null}
+                    : active ? <div className={styles.stagePulse} /> : null}
                 </div>
-                <span
-                  className={styles.stageLabel}
-                  style={{ color: done ? '#5eead4' : active ? '#dde1ec' : '#333' }}
-                >
-                  {st.label}
-                </span>
+                <span className={styles.stageLabel} style={{ color: done ? '#5eead4' : active ? '#dde1ec' : '#333' }}>{st.label}</span>
               </div>
             );
           })}
@@ -87,7 +67,7 @@ export function ProcessingScreen({ logs, progress }: Props) {
 
         <div className={styles.logBox}>
           {logs.map(l => (
-            <div key={l.id} className={LOG_CLASS[l.type]}>{l.msg}</div>
+            <div key={l.id} className={LOG_CLASS[l.type] || styles.logInfo}>{l.msg}</div>
           ))}
           <div ref={logsEndRef} />
         </div>

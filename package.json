@@ -11,11 +11,7 @@
   "devDependencies": {
     "@testing-library/jest-dom": "^5.17.0",
     "@testing-library/react": "^13.4.0",
-    "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^18.19.130",
-    "@types/react": "^18.3.28",
-    "@types/react-dom": "^18.3.7",
-    "typescript": "^4.9.5"
+    "@testing-library/user-event": "^14.6.1"
   },
   "scripts": {
     "start": "react-scripts start",
@@ -24,15 +20,7 @@
     "generate-icons": "node scripts/generate-icons.js"
   },
   "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
+    "production": [">0.2%", "not dead", "not op_mini all"],
+    "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
   }
 }
