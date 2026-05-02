@@ -19,10 +19,16 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
   const renderComposite = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas || !imgEl.current) return;
+    const img = imgEl.current;
+    // Resize canvas to match image if initMasks ran before canvas mounted
+    if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+      canvas.width  = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+    }
     const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height;
     ctx.clearRect(0, 0, W, H);
-    ctx.drawImage(imgEl.current, 0, 0, W, H);
+    ctx.drawImage(img, 0, 0, W, H);
     if (showOrig) return;
     for (let i = 0; i < numLayers; i++) {
       if (!layerVis[i]) continue;
