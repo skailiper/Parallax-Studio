@@ -1,0 +1,174 @@
+.root { display: flex; height: 100vh; overflow: hidden; background: #07070a; }
+
+.sidebar {
+  width: 216px;
+  flex-shrink: 0;
+  background: #0e0e14;
+  border-right: 1px solid #16161f;
+  display: flex;
+  flex-direction: column;
+}
+
+.sideScroll { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 16px; }
+.sideBtm { padding: 12px; border-top: 1px solid #16161f; }
+
+.logoRow { display: flex; align-items: center; gap: 8px; }
+.logoText { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 10px; letter-spacing: 0.2em; color: #5eead4; }
+
+.divider { height: 1px; background: #16161f; margin: 0 -2px; }
+.section { display: flex; flex-direction: column; gap: 9px; }
+.sLabel { font-family: 'Space Mono', monospace; font-size: 9px; color: #3a3a52; letter-spacing: 0.14em; text-transform: uppercase; }
+
+.layerRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.layerDot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.layerName { flex: 1; font-size: 12px; font-weight: 500; }
+
+.iconBtn { background: none; border: none; cursor: pointer; padding: 2px; color: #3a3a52; font-size: 12px; }
+
+.toolRow { display: flex; gap: 6px; }
+
+.toolBtn {
+  flex: 1;
+  padding: 9px 4px;
+  background: none;
+  border: 1px solid #1e1e2c;
+  border-radius: 9px;
+  color: #3a3a52;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  transition: all 0.15s;
+  font-family: 'Space Grotesk', sans-serif;
+}
+
+.toolBtnOn { background: #fff; color: #000; border-color: #fff; }
+
+.toolIco { font-size: 14px; }
+.toolLbl { font-size: 9px; }
+
+.range { width: 100%; accent-color: #5eead4; }
+
+.sizeBtns { display: flex; gap: 5px; }
+
+.sizeBtn {
+  flex: 1;
+  padding: 4px 2px;
+  background: none;
+  border: 1px solid #1e1e2c;
+  border-radius: 5px;
+  color: #3a3a52;
+  cursor: pointer;
+  font-family: 'Space Mono', monospace;
+  font-size: 10px;
+}
+
+.sizeBtnOn { border-color: #5eead4; color: #5eead4; }
+
+.origBtn {
+  padding: 8px 10px;
+  background: none;
+  border: 1px solid #1e1e2c;
+  border-radius: 8px;
+  color: #3a3a52;
+  cursor: pointer;
+  font-family: 'Space Mono', monospace;
+  font-size: 9px;
+  user-select: none;
+}
+
+.hint { background: #0b0b13; border: 1px solid #16161f; border-radius: 10px; padding: 11px 12px; }
+.hintTitle { font-size: 11px; color: #5eead4; margin-bottom: 5px; }
+.hintText { font-size: 11px; color: #3a3a52; line-height: 1.65; }
+
+.processBtn {
+  width: 100%;
+  padding: 13px;
+  background: #5eead4;
+  border: none;
+  border-radius: 10px;
+  color: #020e0c;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: 'Space Grotesk', sans-serif;
+}
+
+.canvasArea { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+.topBar {
+  height: 44px;
+  border-bottom: 1px solid #16161f;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 16px;
+  background: #0e0e14;
+  flex-shrink: 0;
+}
+
+.fileMeta { flex: 1; font-size: 11px; color: #3a3a52; font-family: 'Space Mono', monospace; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+.zoomRow { display: flex; align-items: center; gap: 5px; }
+
+.zBtn { width: 26px; height: 26px; background: none; border: 1px solid #1e1e2c; border-radius: 6px; color: #888; cursor: pointer; font-family: 'Space Mono', monospace; font-size: 14px; }
+.zVal { font-family: 'Space Mono', monospace; font-size: 11px; color: #3a3a52; width: 36px; text-align: center; }
+
+.activeBadge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid;
+  border-radius: 20px;
+  padding: 3px 11px;
+  font-size: 11px;
+  font-family: 'Space Mono', monospace;
+}
+
+.activeDot { width: 7px; height: 7px; border-radius: 50%; }
+
+.canvasScroll {
+  flex: 1;
+  overflow: auto;
+  padding: 28px;
+  background: repeating-conic-gradient(#10101a 0% 25%, #07070a 0% 50%) 0 0 / 24px 24px;
+}
+
+.canvasWrap { transform-origin: top left; display: inline-block; }
+
+.legend {
+  height: 38px;
+  border-top: 1px solid #16161f;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  background: #0e0e14;
+  flex-shrink: 0;
+}
+
+.legendItem {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  font-family: 'Space Mono', monospace;
+  color: #888;
+}
+
+.legendDot { width: 7px; height: 7px; border-radius: 50%; }
+.legendSpacer { flex: 1; }
+.legendHint { font-size: 10px; color: #1e1e2c; font-family: 'Space Mono', monospace; }

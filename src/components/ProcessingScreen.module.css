@@ -1,0 +1,73 @@
+.page {
+  min-height: 100vh;
+  background: #07070a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.card {
+  max-width: 460px;
+  width: 100%;
+  background: #0e0e14;
+  border: 1px solid #16161f;
+  border-radius: 20px;
+  padding: 40px 36px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  animation: fadeUp 0.4s ease;
+}
+
+.logoAnim { position: relative; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; }
+.logoInner { position: absolute; }
+
+.title { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 22px; color: #fff; text-align: center; }
+
+.barWrap { width: 100%; height: 4px; background: #16161f; border-radius: 2px; overflow: hidden; }
+.barFill { height: 100%; background: linear-gradient(90deg, #5eead4, #a78bfa); border-radius: 2px; transition: width 0.5s ease; }
+
+.progNum { font-family: 'Space Mono', monospace; font-size: 11px; color: #3a3a52; margin-top: -10px; }
+
+.stages { width: 100%; display: flex; flex-direction: column; gap: 10px; }
+
+.stage { display: flex; align-items: center; gap: 10px; transition: opacity 0.3s; }
+
+.stageDot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #16161f;
+  border: 1px solid #1e1e2c;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stageDotDone { background: #5eead4; border-color: #5eead4; }
+.stageDotActive { background: transparent; border-color: #5eead4; }
+
+.stagePulse { width: 7px; height: 7px; border-radius: 50%; background: #5eead4; animation: pulse 1.2s infinite; }
+
+.stageLabel { font-family: 'Space Mono', monospace; font-size: 11px; transition: color 0.3s; }
+
+.logBox {
+  width: 100%;
+  background: #040407;
+  border-radius: 10px;
+  padding: 12px 14px;
+  max-height: 180px;
+  overflow-y: auto;
+  font-family: 'Space Mono', monospace;
+  font-size: 11px;
+  line-height: 1.9;
+}
+
+.logSuccess { color: #86efac; }
+.logAi      { color: #5eead4; }
+.logWarn    { color: #fbbf24; }
+.logError   { color: #f87171; }
+.logInfo    { color: #4b5563; }
