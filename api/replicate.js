@@ -12,25 +12,34 @@ function setCors(req, res) {
   res.setHeader('Vary', 'Origin');
 }
 
-// POST to /v1/models/{owner}/{name}/predictions, then poll until done.
-async function replicateRun(input) {
+const SAM2_VERSION = 'fe97b453a6455861e3bac769b441ca1f1086110da7466dbb65cf1eecfd60dc83';
+
+// Unified prediction runner.
+// opts.version  → POST /v1/predictions      { version, input }
+// opts.modelPath → POST /v1/models/{path}/predictions  { input }
+async function replicateRun({ version, modelPath, input }) {
   const key = process.env.REPLICATE_KEY;
+  const url  = version
+    ? 'https://api.replicate.com/v1/predictions'
+    : `https://api.replicate.com/v1/models/${modelPath}/predictions`;
+  const requestBody = version ? { version, input } : { input };
 
   console.log('[replicate] key present:', !!key, '| prefix:', key?.slice(0, 8));
+  console.log('[replicate] endpoint:', url);
   console.log('[replicate] input keys:', Object.keys(input));
 
   // Create prediction — retry up to 4× on 429
   let pred;
   for (let attempt = 0; attempt < 4; attempt++) {
-    console.log(`[replicate] POST flux-fill-pro attempt ${attempt + 1}`);
+    console.log(`[replicate] POST attempt ${attempt + 1}`);
 
-    const res = await fetch('https://api.replicate.com/v1/models/black-forest-labs/flux-fill-pro/predictions', {
+    const res = await fetch(url, {
       method: 'POST',
       headers: {
         Authorization: `Token ${key}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ input }),
+      body: JSON.stringify(requestBody),
     });
 
     const rawText = await res.text();
@@ -96,6 +105,29 @@ module.exports = async function handler(req, res) {
   const { type } = req.body || {};
 
   try {
+    // ── SAM2 Segmentation ──────────────────────────────────────────────────────
+    if (type === 'sam2') {
+      const { imageBase64, pointCoords, pointLabels } = req.body;
+      if (!imageBase64 || !pointCoords?.length)
+        return res.status(400).json({ error: 'imageBase64 and pointCoords required' });
+
+      console.log('[replicate] sam2: image len =', imageBase64.length, 'points =', pointCoords.length);
+
+      const output = await replicateRun({
+        version: SAM2_VERSION,
+        input: {
+          image:           `data:image/png;base64,${imageBase64}`,
+          point_coords:    pointCoords,
+          point_labels:    pointLabels,
+          multimask_output: false,
+        },
+      });
+
+      // output is array of mask URLs; take the first (best) mask
+      const maskUrl = Array.isArray(output) ? output[0] : output;
+      return res.status(200).json({ maskBase64: await urlToBase64(maskUrl) });
+    }
+
     // ── Flux Fill Pro Inpainting ───────────────────────────────────────────────
     if (type === 'inpaint') {
       const { imageBase64, maskBase64: maskB64, prompt } = req.body;
@@ -105,11 +137,14 @@ module.exports = async function handler(req, res) {
       console.log('[replicate] inpaint: image len =', imageBase64.length, 'mask len =', maskB64.length);
 
       const output = await replicateRun({
-        image:    `data:image/png;base64,${imageBase64}`,
-        mask:     `data:image/png;base64,${maskB64}`,
-        prompt:   prompt || 'seamless natural background, photorealistic, highly detailed',
-        steps:    28,
-        guidance: 30,
+        modelPath: 'black-forest-labs/flux-fill-pro',
+        input: {
+          image:    `data:image/png;base64,${imageBase64}`,
+          mask:     `data:image/png;base64,${maskB64}`,
+          prompt:   prompt || 'seamless natural background, photorealistic, highly detailed',
+          steps:    28,
+          guidance: 30,
+        },
       });
 
       const imgUrl = Array.isArray(output) ? output[0] : output;

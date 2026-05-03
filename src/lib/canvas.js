@@ -51,6 +51,7 @@ export function buildInpaintMask(maskCanvases, layerIdx, W, H) {
   ctx.fillStyle = 'black';
   ctx.fillRect(0, 0, W, H);
   for (let j = 0; j < layerIdx; j++) {
+    if (!maskCanvases[j]) continue; // skipped/unpainted layer
     const tmp = createCanvas(W, H);
     const tCtx = tmp.getContext('2d', { willReadFrequently: true });
     tCtx.fillStyle = 'white';
