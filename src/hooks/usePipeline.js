@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { resizeToFit, resizeToReplicate, buildInpaintMask, canvasToJpeg, canvasToPng, createCanvas } from '../lib/canvas';
+import { resizeToReplicate, buildInpaintMask, canvasToPng, createCanvas } from '../lib/canvas';
 import { createProject, updateProjectStatus, saveProjectLayers } from '../lib/supabase';
 import { getSessionId } from '../lib/session';
 import { withRetry } from '../lib/retry';
@@ -16,7 +16,11 @@ export const LAYER_COLORS = [
 ];
 
 async function callReplicate(body) {
-  const res = await fetch('/api/replicate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const res = await fetch('/api/replicate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Replicate error');
   return data;
@@ -30,40 +34,7 @@ function retryOpts(addLog, label) {
   };
 }
 
-// Extract evenly-spaced foreground points from a painted mask for SAM2.
-function extractSAM2Points(sd, pW, pH, tw, th, maxPoints = 6) {
-  const painted = [];
-  for (let y = 3; y < pH - 3; y += 4) {
-    for (let x = 3; x < pW - 3; x += 4) {
-      if (sd.data[(y * pW + x) * 4 + 3] > 64) {
-        painted.push([Math.round(x * tw / pW), Math.round(y * th / pH)]);
-      }
-    }
-  }
-  if (painted.length === 0) return null;
-  const stride = Math.max(1, Math.floor(painted.length / maxPoints));
-  const pts = painted.filter((_, i) => i % stride === 0).slice(0, maxPoints);
-  return { points: pts, pointLabels: pts.map(() => 1) };
-}
-
-// Decode a base64 PNG mask (from SAM2) into a Float32Array alpha at w×h.
-function sam2MaskToAlpha(maskBase64, w, h) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const c = createCanvas(w, h);
-      c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, w, h);
-      const id = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h);
-      const alpha = new Float32Array(w * h);
-      for (let i = 0; i < w * h; i++) alpha[i] = id.data[i * 4] / 255;
-      resolve(alpha);
-    };
-    img.onerror = reject;
-    img.src = `data:image/png;base64,${maskBase64}`;
-  });
-}
-
-// Runs edge-aware selection in a Web Worker so the main thread stays free.
+// Edge-aware selection in a Web Worker — main thread stays free.
 function runAlphaWorker({ strokeBuffer, imgBuffer, W, H }) {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL('../workers/alpha.worker.js', import.meta.url));
@@ -91,68 +62,41 @@ export function usePipeline() {
       projectId = project.id;
     } catch { addLog('⚠️ Supabase offline — continuando sem salvar', 'warn'); }
 
-    // Processing resolution: cap at 640px to keep worker fast
-    const MAX_PROC  = 640;
-    const procScale = Math.min(1, MAX_PROC / Math.max(W, H));
+    // Processing resolution capped at 640px to keep worker fast
+    const procScale = Math.min(1, 640 / Math.max(W, H));
     const pW = Math.round(W * procScale), pH = Math.round(H * procScale);
 
-    // Thumbnail used for SAM2 point prompts
-    const { canvas: thumb, w: tw, h: th } = resizeToFit(imgEl.current, 800);
-    const origB64 = canvasToJpeg(thumb, 0.85);
-
     try {
-      // ── Step 1: Per-layer cutout (SAM2 + edge-aware fallback) ──────────────
-      addLog('✂️ Iniciando segmentação das layers…', 'ai');
+      // ── Step 1: Per-layer cutout via edge-aware canvas worker ───────────────
+      addLog('✂️ Segmentando layers…', 'ai');
       const cutouts = [];
+
       for (let i = 0; i < numLayers; i++) {
         addLog(`✂️ Recortando Layer ${i + 1}…`, 'ai');
 
-        // Downscale mask for worker
         const smallMask = createCanvas(pW, pH);
         smallMask.getContext('2d', { willReadFrequently: true }).drawImage(maskRefs[i], 0, 0, pW, pH);
         const sd = smallMask.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, pW, pH);
 
-        // Quick painted-check
+        // Skip unpainted layers
         let painted = false;
         for (let p = 3; p < sd.data.length; p += 4) if (sd.data[p] > 10) { painted = true; break; }
         if (!painted) { addLog(`⚪ Layer ${i + 1} sem pintura, pulando`, 'warn'); cutouts.push(null); continue; }
 
-        // Try SAM2 for precise segmentation
-        let alphaSmall = null;
-        let alphaW = pW, alphaH = pH;
+        // Edge-aware worker (Sobel gradient propagation)
+        const smallImg = createCanvas(pW, pH);
+        smallImg.getContext('2d', { willReadFrequently: true }).drawImage(imgEl.current, 0, 0, pW, pH);
+        const imgSd = smallImg.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, pW, pH);
+        const alphaSmall = await runAlphaWorker({
+          strokeBuffer: sd.data.buffer.slice(0),
+          imgBuffer:    imgSd.data.buffer.slice(0),
+          W: pW, H: pH,
+        });
 
-        if (useGenerativeAI) {
-          try {
-            const sam2Pts = extractSAM2Points(sd, pW, pH, tw, th);
-            if (sam2Pts) {
-              addLog(`   🎯 SAM2 segmentando Layer ${i + 1}…`, 'ai');
-              const { maskBase64 } = await withRetry(
-                () => callReplicate({ type: 'segment', imageBase64: origB64, ...sam2Pts }),
-                retryOpts(addLog, `SAM2 L${i + 1}`),
-              );
-              alphaSmall = await sam2MaskToAlpha(maskBase64, tw, th);
-              alphaW = tw; alphaH = th;
-              addLog(`   ✅ SAM2 concluído`, 'success');
-            }
-          } catch (e) {
-            addLog(`   ⚠️ SAM2 falhou, usando método local: ${e.message}`, 'warn');
-          }
-        }
-
-        if (!alphaSmall) {
-          // Fallback: local edge-aware selection in Web Worker
-          const smallImg = createCanvas(pW, pH);
-          smallImg.getContext('2d', { willReadFrequently: true }).drawImage(imgEl.current, 0, 0, pW, pH);
-          const imgSd = smallImg.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, pW, pH);
-          const strokeBuffer = sd.data.buffer.slice(0);
-          const imgBuffer    = imgSd.data.buffer.slice(0);
-          alphaSmall = await runAlphaWorker({ strokeBuffer, imgBuffer, W: pW, H: pH });
-        }
-
-        // Convert Float32 alpha → RGBA canvas (GPU-upscaled to W×H later)
-        const aCanvas = createCanvas(alphaW, alphaH);
+        // Alpha → RGBA canvas
+        const aCanvas = createCanvas(pW, pH);
         const aCtx    = aCanvas.getContext('2d', { willReadFrequently: true });
-        const aImg    = new ImageData(alphaW, alphaH);
+        const aImg    = new ImageData(pW, pH);
         for (let j = 0; j < alphaSmall.length; j++) {
           const v = Math.min(255, Math.round(Math.pow(alphaSmall[j], 0.6) * 255));
           aImg.data[j * 4]     = 255;
@@ -162,7 +106,7 @@ export function usePipeline() {
         }
         aCtx.putImageData(aImg, 0, 0);
 
-        // GPU cutout: full-res image × upscaled alpha mask
+        // GPU cutout at full resolution
         const cutoutCanvas = createCanvas(W, H);
         const cCtx = cutoutCanvas.getContext('2d', { willReadFrequently: true });
         cCtx.drawImage(imgEl.current, 0, 0);
@@ -178,7 +122,7 @@ export function usePipeline() {
 
       setProgress(46);
 
-      // ── Step 2: Inpainting (SDXL via Replicate) ────────────────────────────
+      // ── Step 2: SDXL Inpainting via Replicate ──────────────────────────────
       const results = [];
 
       if (useGenerativeAI) {
@@ -205,9 +149,8 @@ export function usePipeline() {
             continue;
           }
 
-          addLog(`🖌️ SDXL Inpainting: Layer ${i + 1}…`, 'ai');
+          addLog(`🖌️ SDXL: Layer ${i + 1}…`, 'ai');
 
-          // Build inpaint mask at Replicate resolution
           const mResized = buildInpaintMask(maskRefs, i, inpaintW, inpaintH);
           const md = mResized.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, inpaintW, inpaintH);
           let hasArea = false;
@@ -215,19 +158,12 @@ export function usePipeline() {
 
           let inpaintedDataURL = null;
           if (hasArea) {
-            const prompt = 'Seamless photorealistic background continuation. Match existing colors, lighting, and textures exactly. No new objects or subjects.';
-            const negativePrompt = 'blurry, artifacts, low quality, watermark, text, new objects, people, different style';
-
+            const prompt = 'Seamless photorealistic background. Match existing colors, lighting, and textures exactly. No new objects.';
             try {
-              const { imageBase64: resultB64 } = await withRetry(() => callReplicate({
-                type: 'inpaint',
-                imageBase64: inpaintB64,
-                maskBase64: canvasToPng(mResized),
-                prompt,
-                negativePrompt,
-                strength: 0.60,
-                steps: 30,
-              }), retryOpts(addLog, `Inpainting L${i + 1}`));
+              const { imageBase64: resultB64 } = await withRetry(
+                () => callReplicate({ type: 'inpaint', imageBase64: inpaintB64, maskBase64: canvasToPng(mResized), prompt }),
+                retryOpts(addLog, `Inpainting L${i + 1}`),
+              );
               inpaintedDataURL = `data:image/png;base64,${resultB64}`;
               addLog(`   ✅ Layer ${i + 1} preenchida`, 'success');
             } catch (e) { addLog(`   ⚠️ ${e.message}`, 'warn'); }
@@ -242,7 +178,6 @@ export function usePipeline() {
           await new Promise(r => setTimeout(r, 80));
         }
       } else {
-        // No generative AI — transparent cutouts only
         addLog('⚡ IA generativa desligada — exportando recortes…', 'info');
         for (let i = 0; i < cutouts.length; i++) {
           const co = cutouts[i];
@@ -267,6 +202,7 @@ export function usePipeline() {
       addLog(`🎉 ${finalResults.length} layer${finalResults.length !== 1 ? 's' : ''} pronta${finalResults.length !== 1 ? 's' : ''}!`, 'success');
       setPhase('done');
       return finalResults;
+
     } catch (e) {
       addLog(`❌ Erro: ${e.message}`, 'error');
       if (projectId) await updateProjectStatus(projectId, 'error', { error_message: e.message }).catch(() => {});
