@@ -44,7 +44,7 @@ module.exports = async function handler(req, res) {
       part('negative_prompt', negativePrompt || 'blurry, artifacts, low quality, watermark, text'),
       part('output_format',   'png'),
       part('steps',           String(steps)),
-      part('strength',        '0.99'),
+      part('strength',        '0.82'),
       Buffer.from(`--${boundary}--\r\n`),
     ]);
 

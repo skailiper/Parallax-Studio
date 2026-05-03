@@ -19,7 +19,8 @@ export default function App() {
   const [layerVis,     setLayerVis]     = useState(Array(8).fill(true));
   const [showOrig,     setShowOrig]     = useState(false);
   const [zoom,         setZoom]         = useState(1);
-  const [exportLayers, setExportLayers] = useState([]);
+  const [exportLayers,     setExportLayers]     = useState([]);
+  const [useGenerativeAI, setUseGenerativeAI] = useState(true);
 
   const { run, logs, progress, phase, setPhase } = usePipeline();
   const painter = usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, showOrig });
@@ -34,7 +35,7 @@ export default function App() {
   async function handleProcess() {
     setScreen('processing');
     setPhase('running');
-    const results = await run({ imgEl: painter.imgEl, maskRefs: painter.maskRefs.current, numLayers, imgFile });
+    const results = await run({ imgEl: painter.imgEl, maskRefs: painter.maskRefs.current, numLayers, imgFile, useGenerativeAI });
     if (results.length > 0) { setExportLayers(results); setScreen('export'); }
     else setScreen('paint');
   }
@@ -49,7 +50,7 @@ export default function App() {
   return (
     <div className={styles.root}>
       {screen === 'upload'     && <UploadScreen numLayers={numLayers} setNumLayers={setNumLayers} onFile={handleFile} />}
-      {screen === 'paint'      && <PaintScreen imgFile={imgFile} imgEl={painter.imgEl} numLayers={numLayers} activeLayer={activeLayer} setActiveLayer={setActiveLayer} tool={tool} setTool={setTool} brushSize={brushSize} setBrushSize={setBrushSize} layerVis={layerVis} setLayerVis={setLayerVis} showOrig={showOrig} setShowOrig={setShowOrig} zoom={zoom} setZoom={setZoom} canvasRef={painter.canvasRef} onDown={painter.onDown} onMove={painter.onMove} onUp={painter.onUp} clearLayer={painter.clearLayer} onProcess={handleProcess} />}
+      {screen === 'paint'      && <PaintScreen imgFile={imgFile} imgEl={painter.imgEl} numLayers={numLayers} activeLayer={activeLayer} setActiveLayer={setActiveLayer} tool={tool} setTool={setTool} brushSize={brushSize} setBrushSize={setBrushSize} layerVis={layerVis} setLayerVis={setLayerVis} showOrig={showOrig} setShowOrig={setShowOrig} zoom={zoom} setZoom={setZoom} canvasRef={painter.canvasRef} onDown={painter.onDown} onMove={painter.onMove} onUp={painter.onUp} clearLayer={painter.clearLayer} onProcess={handleProcess} useGenerativeAI={useGenerativeAI} setUseGenerativeAI={setUseGenerativeAI} />}
       {screen === 'processing' && <ProcessingScreen logs={logs} progress={progress} />}
       {screen === 'export'     && <ExportScreen layers={exportLayers} onEdit={handleEdit} onNew={handleNew} />}
     </div>

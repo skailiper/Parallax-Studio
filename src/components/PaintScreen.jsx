@@ -8,6 +8,7 @@ export function PaintScreen({
   layerVis, setLayerVis, showOrig, setShowOrig,
   zoom, setZoom, canvasRef,
   onDown, onMove, onUp, clearLayer, onProcess,
+  useGenerativeAI, setUseGenerativeAI,
 }) {
   const col       = LAYER_COLORS[activeLayer];
   const sz        = brushSize;
@@ -105,7 +106,7 @@ export function PaintScreen({
               ))}
             </div>
             <div className={styles.shortcutHint}>
-              <span>🖱 Esq: pintar &nbsp;·&nbsp; Dir: apagar &nbsp;·&nbsp; Scroll: mover</span>
+              <span>🖱 Esq: pintar · Dir: apagar · Scroll: mover</span>
             </div>
           </div>
 
@@ -117,6 +118,28 @@ export function PaintScreen({
                 <button key={s} className={`${styles.sizeBtn} ${brushSize===s ? styles.sizeBtnOn : ''}`} onClick={() => setBrushSize(s)}>{s}</button>
               ))}
             </div>
+          </div>
+
+          <div className={styles.divider} />
+
+          {/* ── Generative AI toggle ── */}
+          <div className={styles.toggleRow}>
+            <div className={styles.toggleLabelGroup}>
+              <span className={`${styles.toggleLabel} ${useGenerativeAI ? styles.toggleLabelOn : ''}`}>
+                IA Generativa
+              </span>
+              <span
+                className={styles.toggleInfo}
+                title="Usa Stability AI para preencher automaticamente o fundo por trás de cada camada recortada, recriando a continuidade do que já existe na imagem. Desligado: gera apenas recortes transparentes, sem geração de conteúdo — mais rápido."
+              >ⓘ</span>
+            </div>
+            <button
+              className={`${styles.toggle} ${useGenerativeAI ? styles.toggleOn : ''}`}
+              onClick={() => setUseGenerativeAI(v => !v)}
+              aria-label={useGenerativeAI ? 'Desligar IA generativa' : 'Ligar IA generativa'}
+            >
+              <div className={styles.toggleKnob} />
+            </button>
           </div>
 
           <div className={styles.divider} />

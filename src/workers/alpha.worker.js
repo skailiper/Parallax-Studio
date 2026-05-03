@@ -41,10 +41,43 @@ function applyBBoxesToAlphaMap(alphaMap, bboxes, W, H) {
   return alphaMap;
 }
 
+// Refines boundary pixels by comparing their image color to the interior color.
+// Pixels in the boundary zone that match the interior color get higher alpha;
+// pixels that look like the background get lower alpha. This snaps the mask to
+// natural object edges without any edge-detection model.
+function refineEdgesByColor(alphaMap, imgData, W, H) {
+  let sumR = 0, sumG = 0, sumB = 0, cnt = 0;
+  for (let i = 0; i < alphaMap.length; i++) {
+    if (alphaMap[i] > 0.72) {
+      sumR += imgData[i * 4]; sumG += imgData[i * 4 + 1]; sumB += imgData[i * 4 + 2];
+      cnt++;
+    }
+  }
+  if (cnt < 20) return alphaMap; // not enough anchor pixels — skip
+
+  const avgR = sumR / cnt, avgG = sumG / cnt, avgB = sumB / cnt;
+  const threshold = 80; // color distance considered "different object"
+  const result = new Float32Array(alphaMap);
+  for (let i = 0; i < alphaMap.length; i++) {
+    const a = alphaMap[i];
+    if (a <= 0.05 || a >= 0.88) continue; // leave hard inside/outside alone
+    const r = imgData[i * 4], g = imgData[i * 4 + 1], b = imgData[i * 4 + 2];
+    const dist = Math.sqrt((r - avgR) ** 2 + (g - avgG) ** 2 + (b - avgB) ** 2);
+    const colorSim = Math.max(0, 1 - dist / threshold);
+    // Conservative blend: keep original stroke intent but push boundary toward edges
+    result[i] = a * 0.55 + colorSim * 0.45;
+  }
+  return result;
+}
+
 self.onmessage = function ({ data }) {
-  const { strokeBuffer, W, H, brushSize, expansionFactor, bboxes } = data;
+  const { strokeBuffer, imgBuffer, W, H, brushSize, expansionFactor, bboxes } = data;
   const strokeData = new Uint8ClampedArray(strokeBuffer);
   let alphaMap = expandStrokeToAlphaMap(strokeData, W, H, brushSize, expansionFactor);
   if (bboxes?.length) alphaMap = applyBBoxesToAlphaMap(alphaMap, bboxes, W, H);
+  if (imgBuffer) {
+    const imgData = new Uint8ClampedArray(imgBuffer);
+    alphaMap = refineEdgesByColor(alphaMap, imgData, W, H);
+  }
   self.postMessage({ alphaBuffer: alphaMap.buffer }, [alphaMap.buffer]);
 };
