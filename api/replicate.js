@@ -80,21 +80,19 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ maskBase64: await urlToBase64(maskUrl) });
     }
 
-    // ── SDXL inpainting ────────────────────────────────────────────────────────
+    // ── Flux Fill Pro inpainting ───────────────────────────────────────────────
     if (type === 'inpaint') {
-      const { imageBase64, maskBase64: maskB64, prompt, negativePrompt, strength = 0.60, steps = 30 } = req.body;
+      const { imageBase64, maskBase64: maskB64, prompt, steps = 28 } = req.body;
       if (!imageBase64 || !maskB64)
         return res.status(400).json({ error: 'imageBase64 and maskBase64 required' });
 
-      // 'stability-ai' is the model owner's handle on Replicate — not a product dependency
-      const output = await replicateRun('stability-ai/stable-diffusion-inpainting', {
-        image:      `data:image/jpeg;base64,${imageBase64}`,
-        mask_image: `data:image/png;base64,${maskB64}`,
-        prompt: prompt || 'seamless natural background, photorealistic, highly detailed',
-        negative_prompt: negativePrompt || 'blurry, artifacts, low quality, watermark, text',
-        num_inference_steps: Math.round(steps),
-        guidance_scale: 7.5,
-        strength: Math.min(0.85, Math.max(0.3, strength)),
+      const output = await replicateRun('black-forest-labs/flux-fill-pro', {
+        image:         `data:image/jpeg;base64,${imageBase64}`,
+        mask:          `data:image/png;base64,${maskB64}`,
+        prompt:        prompt || 'seamless natural background, photorealistic, highly detailed',
+        steps:         Math.round(steps),
+        guidance:      30,
+        output_format: 'png',
       });
 
       const imgUrl = Array.isArray(output) ? output[0] : output;

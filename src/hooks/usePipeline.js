@@ -212,12 +212,12 @@ Respond ONLY with valid JSON:
 
       setProgress(46);
 
-      // ── Step 3: Inpainting (Replicate SDXL) ────────────────────────────────
+      // ── Step 3: Inpainting (Replicate Flux Fill Pro) ───────────────────────
       const results = [];
 
       if (useGenerativeAI) {
         if (projectId) await updateProjectStatus(projectId, 'inpainting');
-        addLog('🎨 Replicate SDXL preenchendo fundo…', 'ai');
+        addLog('🎨 Replicate Flux Fill Pro preenchendo fundo…', 'ai');
 
         const { canvas: inpaintCanvas } = resizeToReplicate(imgEl.current);
         const inpaintW = inpaintCanvas.width, inpaintH = inpaintCanvas.height;
@@ -240,7 +240,7 @@ Respond ONLY with valid JSON:
             continue;
           }
 
-          addLog(`🖌️ Replicate SDXL: Layer ${i + 1}…`, 'ai');
+          addLog(`🖌️ Flux Fill Pro: Layer ${i + 1}…`, 'ai');
 
           // Build inpaint mask at Replicate resolution
           const mResized = buildInpaintMask(maskRefs, i, inpaintW, inpaintH);
@@ -250,9 +250,8 @@ Respond ONLY with valid JSON:
 
           let inpaintedDataURL = null;
           if (hasArea) {
-            // Build a highly specific prompt from the scene analysis.
-            // The goal: Replicate SDXL should CONTINUE the existing background,
-            // not invent new content. We describe exactly what's visible at the edges.
+            // Build a specific prompt so Flux Fill Pro continues the existing
+            // background instead of inventing new content.
             const li = co.layerInfo;
             const behindDesc = li.behindDescription || '';
             const sceneCtx   = [analysis.scene, analysis.mood].filter(Boolean).join(', ');
@@ -262,23 +261,13 @@ Respond ONLY with valid JSON:
               ? `Seamlessly extend and fill: ${behindDesc}. Scene context: ${sceneCtx}. ${palette} Match existing colors, lighting, and texture exactly. No new objects. Photorealistic continuation only.`
               : `Seamless background fill matching this scene: ${sceneCtx}. ${palette} Continue existing background with same lighting, colors, and atmosphere. No new objects or subjects.`;
 
-            const negativePrompt = [
-              'interior', 'indoors', 'room', 'furniture', 'chair', 'table', 'wall decoration',
-              'ceiling', 'floor', 'window', 'curtain', 'lamp',
-              'different style', 'painting', 'cartoon', 'anime',
-              'new objects', 'people', 'hallucination', 'artifacts',
-              'blurry', 'low quality', 'watermark', 'text',
-            ].join(', ');
-
             try {
               const { imageBase64: resultB64 } = await withRetry(() => callReplicate({
                 type: 'inpaint',
                 imageBase64: inpaintB64,
                 maskBase64: canvasToPng(mResized),
                 prompt,
-                negativePrompt,
-                strength: 0.60,
-                steps: 30,
+                steps: 28,
               }), retryOpts(addLog, `Inpainting L${i + 1}`));
               inpaintedDataURL = `data:image/png;base64,${resultB64}`;
               addLog(`   ✅ Layer ${i + 1} preenchida`, 'success');
