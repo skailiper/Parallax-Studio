@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { resizeToFit, resizeToStability, buildSketchOverlay, buildInpaintMask, buildCutout, expandStrokeToAlphaMap, applyBBoxesToAlphaMap, canvasToJpeg, canvasToPng, createCanvas } from '../lib/canvas';
+import { resizeToFit, resizeToStability, buildSketchOverlay, buildInpaintMask, canvasToJpeg, canvasToPng, createCanvas } from '../lib/canvas';
 import { createProject, updateProjectStatus, saveProjectLayers, logProcessingEvent } from '../lib/supabase';
 import { getSessionId } from '../lib/session';
 import { withRetry } from '../lib/retry';
@@ -37,6 +37,17 @@ function retryOpts(addLog, label) {
   };
 }
 
+// Runs expandStroke + applyBBoxes in a Web Worker so the main thread stays responsive.
+// Computation is done at thumbnail scale (≤640px) to avoid O(W×H×radius²) freeze.
+function runAlphaWorker({ strokeBuffer, W, H, brushSize, expansionFactor, bboxes }) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('../workers/alpha.worker.js', import.meta.url));
+    worker.onmessage = ({ data }) => { worker.terminate(); resolve(new Float32Array(data.alphaBuffer)); };
+    worker.onerror  = (e)        => { worker.terminate(); reject(new Error(e.message || 'Worker error')); };
+    worker.postMessage({ strokeBuffer, W, H, brushSize, expansionFactor, bboxes }, [strokeBuffer]);
+  });
+}
+
 export function usePipeline() {
   const [logs,     setLogs]     = useState([]);
   const [progress, setProgress] = useState(0);
@@ -52,6 +63,11 @@ export function usePipeline() {
       const project = await createProject({ sessionId, numLayers, imageFilename: imgFile.name, imageSizeBytes: imgFile.size });
       projectId = project.id;
     } catch { addLog('⚠️ Supabase offline — continuando sem salvar', 'warn'); }
+
+    // Thumbnail scale for alpha computation (avoids freeze on large images)
+    const MAX_PROC = 640;
+    const procScale = Math.min(1, MAX_PROC / Math.max(W, H));
+    const pW = Math.round(W * procScale), pH = Math.round(H * procScale);
 
     try {
       addLog('🔍 Claude analisando cena e esboços…', 'ai');
@@ -77,7 +93,12 @@ export function usePipeline() {
       for (let i = 0; i < numLayers; i++) {
         const li = analysis.layers?.find(l => l.index === i) || {};
         addLog(`✂️ Recortando Layer ${i+1}${li.elements?.length ? ` — ${li.elements.join(', ')}` : ''} …`, 'ai');
-        const sd = maskRefs[i].getContext('2d').getImageData(0, 0, W, H);
+
+        // Scale mask to thumbnail for fast painted-check and worker computation
+        const smallMask = createCanvas(pW, pH);
+        smallMask.getContext('2d').drawImage(maskRefs[i], 0, 0, pW, pH);
+        const sd = smallMask.getContext('2d').getImageData(0, 0, pW, pH);
+
         let painted = false;
         for (let p = 3; p < sd.data.length; p += 4) if (sd.data[p] > 10) { painted = true; break; }
         if (!painted) { addLog(`⚪ Layer ${i+1} sem pintura, pulando`, 'warn'); cutouts.push(null); continue; }
@@ -95,9 +116,38 @@ export function usePipeline() {
           addLog(`   📐 ${seg.objects?.map(o => o.label).join(', ') || 'mapeado'}`, 'info');
         } catch { addLog(`   ⚠️ Segmentação base para L${i+1}`, 'warn'); }
 
-        let alphaMap = expandStrokeToAlphaMap(sd, W, H, 36, seg?.expansionFactor || 2.3);
-        if (seg?.objects?.length) alphaMap = applyBBoxesToAlphaMap(alphaMap, seg.objects, W, H);
-        cutouts.push({ index: i, cutoutCanvas: buildCutout(imgEl.current, W, H, alphaMap), layerInfo: li });
+        // Heavy alpha expansion runs in a worker at thumbnail scale — main thread stays free
+        const strokeBuffer = sd.data.buffer.slice(0); // copy so buffer stays valid
+        const alphaSmall = await runAlphaWorker({
+          strokeBuffer,
+          W: pW, H: pH,
+          brushSize: Math.max(2, Math.round(36 * procScale)),
+          expansionFactor: seg?.expansionFactor || 2.3,
+          bboxes: seg?.objects || [],
+        });
+
+        // Convert Float32 alpha map → RGBA canvas at thumbnail scale
+        const aCanvas = createCanvas(pW, pH);
+        const aCtx    = aCanvas.getContext('2d');
+        const aImg    = new ImageData(pW, pH);
+        for (let j = 0; j < alphaSmall.length; j++) {
+          const v = Math.min(255, Math.round(alphaSmall[j] * 400));
+          aImg.data[j * 4]     = 255;
+          aImg.data[j * 4 + 1] = 255;
+          aImg.data[j * 4 + 2] = 255;
+          aImg.data[j * 4 + 3] = v;
+        }
+        aCtx.putImageData(aImg, 0, 0);
+
+        // GPU cutout: full-res image masked by upscaled alpha thumbnail
+        const cutoutCanvas = createCanvas(W, H);
+        const cCtx = cutoutCanvas.getContext('2d');
+        cCtx.drawImage(imgEl.current, 0, 0);
+        cCtx.globalCompositeOperation = 'destination-in';
+        cCtx.drawImage(aCanvas, 0, 0, W, H);
+        cCtx.globalCompositeOperation = 'source-over';
+
+        cutouts.push({ index: i, cutoutCanvas, layerInfo: li });
         setProgress(12 + Math.round(((i + 1) / numLayers) * 33));
         addLog(`   ✅ Layer ${i+1} recortada`, 'success');
         await new Promise(r => setTimeout(r, 20));
@@ -116,9 +166,9 @@ export function usePipeline() {
         const co = cutouts[i];
         if (!co) { results.push(null); continue; }
         addLog(`🖌️ Stability AI: Layer ${i+1}…`, 'ai');
-        const mFull = buildInpaintMask(maskRefs, i, W, H);
-        const mResized = createCanvas(stableW, stableH);
-        mResized.getContext('2d').drawImage(mFull, 0, 0, stableW, stableH);
+
+        // Build inpaint mask directly at stability resolution (avoids full-res processing)
+        const mResized = buildInpaintMask(maskRefs, i, stableW, stableH);
         const md = mResized.getContext('2d').getImageData(0, 0, stableW, stableH);
         let hasArea = false;
         for (let p = 0; p < md.data.length; p += 4) if (md.data[p] > 128) { hasArea = true; break; }
@@ -141,7 +191,7 @@ export function usePipeline() {
           elements: co.layerInfo?.elements || [], cutoutDataURL: co.cutoutCanvas.toDataURL('image/png'),
           inpaintedDataURL, hasInpaint: !!inpaintedDataURL,
         });
-        setProgress(46 + Math.round(((i + 1) / numLayers) * 46));
+        setProgress(46 + Math.round(((i + 1) / cutouts.length) * 46));
         await new Promise(r => setTimeout(r, 80));
       }
 
