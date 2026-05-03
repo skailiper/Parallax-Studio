@@ -13,13 +13,29 @@ function Checker() {
   return <div className={styles.checker} />;
 }
 
+function ThumbCard({ label, src, dlLabel, onDl, green }) {
+  return (
+    <div className={styles.card}>
+      <div className={`${styles.cardLabel} ${green ? styles.cardLabelGen : ''}`}>{label}</div>
+      <div className={styles.thumbWrap}>
+        <Checker />
+        <img src={src} alt={label} className={styles.thumb} />
+      </div>
+      <div className={styles.thumbMeta}>
+        <span className={styles.thumbLabel}>{dlLabel}</span>
+        <button className={`${styles.dlBtn} ${green ? styles.dlBtnGreen : ''}`} onClick={onDl}>⬇ PNG</button>
+      </div>
+    </div>
+  );
+}
+
 export function ExportScreen({ layers, onEdit, onNew }) {
   const [downloading, setDownloading] = useState(false);
 
   function dl(layer, type = 'cutout') {
     const a = document.createElement('a');
     a.href     = type === 'cutout' ? layer.cutoutDataURL : layer.inpaintedDataURL;
-    a.download = `parallax-L${layer.index+1}-${type}.png`;
+    a.download = `parallax-L${layer.index + 1}-${type}.png`;
     a.click();
     trackUsage({ sessionId: getSessionId(), action: 'download_layer', meta: { layerIndex: layer.index, type } });
   }
@@ -46,7 +62,7 @@ export function ExportScreen({ layers, onEdit, onNew }) {
           </svg>
           <div>
             <div className={styles.logoName}>PARALLAX STUDIO</div>
-            <div className={styles.logoSub}>{layers.length} layer{layers.length !== 1 ? 's' : ''} prontas</div>
+            <div className={styles.logoSub}>{layers.length} layer{layers.length !== 1 ? 's' : ''} pronta{layers.length !== 1 ? 's' : ''}</div>
           </div>
         </div>
         <div className={styles.btnRow}>
@@ -59,33 +75,39 @@ export function ExportScreen({ layers, onEdit, onNew }) {
       </div>
 
       <div className={styles.inner}>
-        <div className={styles.grid}>
-          {layers.map(l => (
-            <div key={l.index} className={styles.card}>
-              <div className={styles.cardBadge} style={{ background: l.color }}>L{l.index+1}</div>
-              <div className={styles.thumbWrap}>
-                <Checker />
-                <img src={l.cutoutDataURL} alt={l.label} className={styles.thumb} />
-              </div>
-              <div className={styles.thumbMeta}>
-                <span className={styles.thumbLabel}>Recorte transparente</span>
-                <button className={styles.dlBtn} onClick={() => dl(l, 'cutout')}>⬇ PNG</button>
-              </div>
-              {l.hasInpaint && <>
-                <div className={styles.sep} />
-                <div className={styles.thumbWrap}>
-                  <Checker />
-                  <img src={l.inpaintedDataURL} alt="" className={styles.thumb} />
-                </div>
-                <div className={styles.thumbMeta}>
-                  <span className={styles.thumbLabel}>Com fundo gerado</span>
-                  <button className={`${styles.dlBtn} ${styles.dlBtnGreen}`} onClick={() => dl(l, 'inpainted')}>⬇ PNG</button>
-                </div>
-              </>}
-              {l.elements?.length > 0 && <div className={styles.elements}>{l.elements.slice(0, 3).join(' · ')}</div>}
+        {layers.map(l => (
+          <div key={l.index} className={styles.layerGroup}>
+            {/* Layer header */}
+            <div className={styles.layerHeader}>
+              <div className={styles.layerDot} style={{ background: l.color }} />
+              <span className={styles.layerTitle} style={{ color: l.color }}>Layer {l.index + 1}</span>
+              {l.elements?.length > 0 && (
+                <span className={styles.layerElements}>{l.elements.slice(0, 4).join(' · ')}</span>
+              )}
+              <div className={styles.layerSep} />
             </div>
-          ))}
-        </div>
+
+            {/* Cards: transparent cutout + generated (side by side) */}
+            <div className={styles.layerCards}>
+              <ThumbCard
+                label="Recorte transparente"
+                src={l.cutoutDataURL}
+                dlLabel="Sem fundo"
+                onDl={() => dl(l, 'cutout')}
+                green={false}
+              />
+              {l.hasInpaint && (
+                <ThumbCard
+                  label="Com fundo gerado por IA"
+                  src={l.inpaintedDataURL}
+                  dlLabel="Com fundo"
+                  onDl={() => dl(l, 'inpainted')}
+                  green={true}
+                />
+              )}
+            </div>
+          </div>
+        ))}
 
         <div className={styles.tipsBlock}>
           <div className={styles.tipsTitle}>Velocidade sugerida no parallax</div>

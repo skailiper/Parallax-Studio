@@ -37,15 +37,15 @@ function retryOpts(addLog, label) {
   };
 }
 
-// Runs heavy alpha computation + edge refinement in a Web Worker.
-function runAlphaWorker({ strokeBuffer, imgBuffer, W, H, brushSize, expansionFactor, bboxes }) {
+// Runs edge-aware selection in a Web Worker so the main thread stays free.
+function runAlphaWorker({ strokeBuffer, imgBuffer, W, H }) {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL('../workers/alpha.worker.js', import.meta.url));
     worker.onmessage = ({ data }) => { worker.terminate(); resolve(new Float32Array(data.alphaBuffer)); };
     worker.onerror  = (e)        => { worker.terminate(); reject(new Error(e.message || 'Worker error')); };
     const transfers = [strokeBuffer];
     if (imgBuffer) transfers.push(imgBuffer);
-    worker.postMessage({ strokeBuffer, imgBuffer, W, H, brushSize, expansionFactor, bboxes }, transfers);
+    worker.postMessage({ strokeBuffer, imgBuffer, W, H }, transfers);
   });
 }
 
@@ -65,18 +65,19 @@ export function usePipeline() {
       projectId = project.id;
     } catch { addLog('⚠️ Supabase offline — continuando sem salvar', 'warn'); }
 
-    // Thumbnail scale for alpha computation (avoids freeze on large images)
-    const MAX_PROC = 640;
+    // Processing resolution: cap at 640px to keep worker fast
+    const MAX_PROC  = 640;
     const procScale = Math.min(1, MAX_PROC / Math.max(W, H));
     const pW = Math.round(W * procScale), pH = Math.round(H * procScale);
 
     try {
-      addLog('🔍 Claude analisando cena e esboços…', 'ai');
+      // ── Step 1: Scene analysis ──────────────────────────────────────────────
+      addLog('🔍 Claude analisando cena…', 'ai');
       const { canvas: thumb, w: tw, h: th } = resizeToFit(imgEl.current, 800);
       const origB64   = canvasToJpeg(thumb, 0.85);
       const sketchB64 = canvasToJpeg(buildSketchOverlay(imgEl.current, maskRefs, numLayers, LAYER_COLORS, tw, th), 0.85);
 
-      let analysis = null;
+      let analysis = { imageStyle: 'photograph', scene: '', mood: '', layers: [] };
       try {
         const raw = await withRetry(() => callClaude({
           model: 'claude-sonnet-4-20250514',
@@ -84,83 +85,56 @@ export function usePipeline() {
           messages: [{ role: 'user', content: [
             { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: origB64 } },
             { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: sketchB64 } },
-            { type: 'text', text: `Image 1: original photo/illustration. Image 2: rough brush strokes marking ${numLayers} parallax layers (colors: ${LAYER_COLORS.slice(0, numLayers).map((c, i) => `L${i+1}=${c.hex}`).join(', ')}). L1=closest foreground, L${numLayers}=background.
+            { type: 'text', text: `Image 1: the original scene. Image 2: rough brush strokes indicating ${numLayers} parallax layers (${LAYER_COLORS.slice(0, numLayers).map((c, i) => `L${i+1}=${c.hex}`).join(', ')}). L1=frontmost, L${numLayers}=background.
 
-Analyze the scene and identify each painted layer. Respond ONLY with valid JSON:
-{"imageStyle":"photograph|painting|illustration","scene":"one-sentence description","mood":"lighting and atmosphere","layers":[{"index":0,"elements":["specific object names"],"depth":"foreground|midground|background"}]}` },
+Analyze the scene thoroughly. Pay attention to:
+- Overall mood, lighting, color palette, and atmosphere
+- What each painted layer represents
+- What background content would be VISIBLE behind each painted object (what is already partially visible at its edges)
+
+Respond ONLY with valid JSON:
+{"imageStyle":"photograph|painting|illustration","scene":"detailed scene description","mood":"precise lighting and atmosphere description — colors, temperature, brightness","palette":"dominant colors as hex codes e.g. #1a2b3c, #4d5e6f","layers":[{"index":0,"elements":["specific object names"],"depth":"foreground|midground|background","behindDescription":"what is ALREADY VISIBLE at the edges of this object in the original image — describe exact colors, textures, patterns seen there"}]}` },
           ]}],
         }), retryOpts(addLog, 'Análise de cena'));
         analysis = JSON.parse(raw);
         addLog(`✅ Cena: ${analysis.scene?.slice(0, 60)}`, 'success');
-        addLog(`🎨 Estilo: ${analysis.imageStyle}`, 'info');
         if (projectId) await logProcessingEvent(projectId, 'scene_analyzed', { style: analysis.imageStyle });
-      } catch { addLog('⚠️ Análise parcial', 'warn'); analysis = { imageStyle: 'photograph', scene: '', mood: '', layers: [] }; }
+      } catch { addLog('⚠️ Análise parcial — continuando', 'warn'); }
       setProgress(12);
 
+      // ── Step 2: Per-layer cutout (edge-aware selection) ─────────────────────
       const cutouts = [];
       for (let i = 0; i < numLayers; i++) {
         const li = analysis.layers?.find(l => l.index === i) || {};
         addLog(`✂️ Recortando Layer ${i + 1}${li.elements?.length ? ` — ${li.elements.join(', ')}` : ''} …`, 'ai');
 
-        // Scale mask and image to thumbnail for fast processing
+        // Downscale mask and image for worker
         const smallMask = createCanvas(pW, pH);
         smallMask.getContext('2d').drawImage(maskRefs[i], 0, 0, pW, pH);
         const sd = smallMask.getContext('2d').getImageData(0, 0, pW, pH);
 
+        // Quick painted-check on small data
         let painted = false;
         for (let p = 3; p < sd.data.length; p += 4) if (sd.data[p] > 10) { painted = true; break; }
         if (!painted) { addLog(`⚪ Layer ${i + 1} sem pintura, pulando`, 'warn'); cutouts.push(null); continue; }
 
-        // Small original image for color-based edge refinement in worker
+        // Downscale original image for gradient-based edge detection
         const smallImg = createCanvas(pW, pH);
         smallImg.getContext('2d').drawImage(imgEl.current, 0, 0, pW, pH);
         const imgSd = smallImg.getContext('2d').getImageData(0, 0, pW, pH);
 
-        // Thumbnail mask for Claude segmentation prompt
-        const mt = createCanvas(tw, th); mt.getContext('2d').drawImage(maskRefs[i], 0, 0, tw, th);
-        const mb64 = canvasToJpeg(mt, 0.75);
-
-        let seg = null;
-        try {
-          // Ask Claude to: 1) give tight bboxes, 2) describe background at mask edges for inpainting
-          const sr = await withRetry(() => callClaude({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 1500,
-            messages: [{ role: 'user', content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: origB64 } },
-              { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: mb64 } },
-              { type: 'text', text: `Image 1: original (${W}×${H}px, style: ${analysis.imageStyle}).
-Image 2: user's rough brush strokes marking Layer ${i + 1} (${(li.elements || []).join(', ') || 'unknown objects'}).
-
-Task A — Tight segmentation: Identify the exact objects painted and return ONE tight bounding box per distinct object, wrapping the true object boundary visible in Image 1, NOT the brush stroke boundary. Coordinates as percentages of image dimensions.
-
-Task B — Background analysis for inpainting: Look at the pixels in Image 1 that are DIRECTLY ADJACENT to (just outside) the painted region. What specific colors, textures, patterns, or content do you see there? Describe only what is ALREADY VISIBLE in the image at those border areas — this will be used to seamlessly extend that content inward. Do NOT describe what might be behind the object; describe the actual visible border content.
-
-Respond ONLY with valid JSON:
-{"objects":[{"label":"name","x1pct":0,"y1pct":0,"x2pct":100,"y2pct":100,"softness":10,"priority":1.0}],"expansionFactor":2.2,"inpaintPrompt":"[specific: extend the exact colors/textures/patterns visible at the edges — e.g. 'continue the muted blue-gray overcast sky visible at the top edge, matching existing grain and lighting']","negativePrompt":"no new objects, no hallucination, no mountains, no vegetation unless already present, match existing image exactly"}` },
-            ]}],
-          }), retryOpts(addLog, `Segmentação L${i + 1}`));
-          seg = JSON.parse(sr);
-          addLog(`   📐 ${seg.objects?.map(o => o.label).join(', ') || 'mapeado'}`, 'info');
-        } catch { addLog(`   ⚠️ Segmentação base para L${i + 1}`, 'warn'); }
-
-        // Heavy alpha expansion + color-based edge refinement in worker (thumbnail scale)
+        // Edge-aware selection in worker (main thread stays free)
         const strokeBuffer = sd.data.buffer.slice(0);
         const imgBuffer    = imgSd.data.buffer.slice(0);
-        const alphaSmall = await runAlphaWorker({
-          strokeBuffer, imgBuffer,
-          W: pW, H: pH,
-          brushSize: Math.max(2, Math.round(36 * procScale)),
-          expansionFactor: seg?.expansionFactor || 2.2,
-          bboxes: seg?.objects || [],
-        });
+        const alphaSmall = await runAlphaWorker({ strokeBuffer, imgBuffer, W: pW, H: pH });
 
         // Convert Float32 alpha → RGBA canvas at thumbnail scale
         const aCanvas = createCanvas(pW, pH);
         const aCtx    = aCanvas.getContext('2d');
         const aImg    = new ImageData(pW, pH);
         for (let j = 0; j < alphaSmall.length; j++) {
-          const v = Math.min(255, Math.round(alphaSmall[j] * 400));
+          // Boost: alpha values are 0–1 from propagation; compress to 0–255
+          const v = Math.min(255, Math.round(Math.pow(alphaSmall[j], 0.6) * 255));
           aImg.data[j * 4]     = 255;
           aImg.data[j * 4 + 1] = 255;
           aImg.data[j * 4 + 2] = 255;
@@ -173,18 +147,18 @@ Respond ONLY with valid JSON:
         const cCtx = cutoutCanvas.getContext('2d');
         cCtx.drawImage(imgEl.current, 0, 0);
         cCtx.globalCompositeOperation = 'destination-in';
-        cCtx.drawImage(aCanvas, 0, 0, W, H);
+        cCtx.drawImage(aCanvas, 0, 0, W, H); // GPU upscale
         cCtx.globalCompositeOperation = 'source-over';
 
-        cutouts.push({ index: i, cutoutCanvas, layerInfo: li, seg });
-        setProgress(12 + Math.round(((i + 1) / numLayers) * 33));
+        cutouts.push({ index: i, cutoutCanvas, layerInfo: li });
+        setProgress(12 + Math.round(((i + 1) / numLayers) * 34));
         addLog(`   ✅ Layer ${i + 1} recortada`, 'success');
         await new Promise(r => setTimeout(r, 20));
       }
 
       setProgress(46);
 
-      // ── Inpainting (Stability AI) ─────────────────────────────────────────
+      // ── Step 3: Inpainting (Stability AI) ──────────────────────────────────
       const results = [];
 
       if (useGenerativeAI) {
@@ -198,9 +172,23 @@ Respond ONLY with valid JSON:
         for (let i = 0; i < cutouts.length; i++) {
           const co = cutouts[i];
           if (!co) { results.push(null); continue; }
+
+          // Layer 1 (index 0) is the frontmost — no inpainting needed
+          if (i === 0) {
+            addLog(`   ℹ️ Layer 1 é frontal — sem inpainting`, 'info');
+            results.push({
+              index: i, label: `Layer ${i + 1}`, color: LAYER_COLORS[i].hex,
+              elements: co.layerInfo?.elements || [],
+              cutoutDataURL: co.cutoutCanvas.toDataURL('image/png'),
+              inpaintedDataURL: null, hasInpaint: false,
+            });
+            setProgress(46 + Math.round(((i + 1) / cutouts.length) * 46));
+            continue;
+          }
+
           addLog(`🖌️ Stability AI: Layer ${i + 1}…`, 'ai');
 
-          // Build inpaint mask at stability resolution (avoids full-res processing)
+          // Build inpaint mask at stability resolution
           const mResized = buildInpaintMask(maskRefs, i, stableW, stableH);
           const md = mResized.getContext('2d').getImageData(0, 0, stableW, stableH);
           let hasArea = false;
@@ -208,19 +196,34 @@ Respond ONLY with valid JSON:
 
           let inpaintedDataURL = null;
           if (hasArea) {
-            // Use the per-layer inpaint prompt from segmentation (describes actual border content)
-            // Fall back to scene description only as a last resort
-            const prompt = co.seg?.inpaintPrompt
-              || `seamless continuation of the existing ${analysis.scene} background, matching exact colors and lighting already present, photorealistic`;
-            const negativePrompt = co.seg?.negativePrompt
-              || 'new objects, hallucination, different style, artifacts, blur, watermark, text';
+            // Build a highly specific prompt from the scene analysis.
+            // The goal: Stability AI should CONTINUE the existing background,
+            // not invent new content. We describe exactly what's visible at the edges.
+            const li = co.layerInfo;
+            const behindDesc = li.behindDescription || '';
+            const sceneCtx   = [analysis.scene, analysis.mood].filter(Boolean).join(', ');
+            const palette     = analysis.palette ? `Color palette: ${analysis.palette}.` : '';
+
+            const prompt = behindDesc
+              ? `Seamlessly extend and fill: ${behindDesc}. Scene context: ${sceneCtx}. ${palette} Match existing colors, lighting, and texture exactly. No new objects. Photorealistic continuation only.`
+              : `Seamless background fill matching this scene: ${sceneCtx}. ${palette} Continue existing background with same lighting, colors, and atmosphere. No new objects or subjects.`;
+
+            const negativePrompt = [
+              'interior', 'indoors', 'room', 'furniture', 'chair', 'table', 'wall decoration',
+              'ceiling', 'floor', 'window', 'curtain', 'lamp',
+              'different style', 'painting', 'cartoon', 'anime',
+              'new objects', 'people', 'hallucination', 'artifacts',
+              'blurry', 'low quality', 'watermark', 'text',
+            ].join(', ');
+
             try {
               inpaintedDataURL = await withRetry(() => callStability({
                 imageBase64: stableB64,
                 maskBase64: canvasToPng(mResized),
                 prompt,
                 negativePrompt,
-                steps: 35,
+                strength: 0.60,
+                steps: 30,
               }), retryOpts(addLog, `Inpainting L${i + 1}`));
               addLog(`   ✅ Layer ${i + 1} preenchida`, 'success');
             } catch (e) { addLog(`   ⚠️ ${e.message}`, 'warn'); }
@@ -236,7 +239,7 @@ Respond ONLY with valid JSON:
           await new Promise(r => setTimeout(r, 80));
         }
       } else {
-        // No generative AI — export transparent cutouts only
+        // No generative AI — transparent cutouts only
         addLog('⚡ IA generativa desligada — exportando recortes…', 'info');
         for (let i = 0; i < cutouts.length; i++) {
           const co = cutouts[i];

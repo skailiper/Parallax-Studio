@@ -20,7 +20,7 @@ module.exports = async function handler(req, res) {
   if (!process.env.STABILITY_KEY) return res.status(500).json({ error: 'STABILITY_KEY not configured' });
 
   try {
-    const { imageBase64, maskBase64, prompt, negativePrompt, steps = 40 } = req.body;
+    const { imageBase64, maskBase64, prompt, negativePrompt, steps = 30, strength = 0.60 } = req.body;
     const imageBuffer = Buffer.from(imageBase64, 'base64');
     const maskBuffer  = Buffer.from(maskBase64,  'base64');
     const boundary = '----ParallaxBoundary' + Math.random().toString(36).slice(2);
@@ -44,7 +44,7 @@ module.exports = async function handler(req, res) {
       part('negative_prompt', negativePrompt || 'blurry, artifacts, low quality, watermark, text'),
       part('output_format',   'png'),
       part('steps',           String(steps)),
-      part('strength',        '0.82'),
+      part('strength',        String(Math.min(0.85, Math.max(0.3, strength)))),
       Buffer.from(`--${boundary}--\r\n`),
     ]);
 
