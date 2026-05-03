@@ -15,7 +15,7 @@ export function resizeToFit(img, maxPx = 900) {
   c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, w, h);
   return { canvas: c, w, h, scale };
 }
-export function resizeToStability(img) {
+export function resizeToReplicate(img) {
   const maxPx = 1024;
   const scale = Math.min(1, maxPx / Math.max(img.naturalWidth, img.naturalHeight));
   const w = Math.round(img.naturalWidth * scale / 64) * 64;

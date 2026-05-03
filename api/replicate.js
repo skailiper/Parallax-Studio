@@ -86,6 +86,7 @@ module.exports = async function handler(req, res) {
       if (!imageBase64 || !maskB64)
         return res.status(400).json({ error: 'imageBase64 and maskBase64 required' });
 
+      // 'stability-ai' is the model owner's handle on Replicate — not a product dependency
       const output = await replicateRun('stability-ai/stable-diffusion-inpainting', {
         image:      `data:image/jpeg;base64,${imageBase64}`,
         mask_image: `data:image/png;base64,${maskB64}`,

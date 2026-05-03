@@ -4,7 +4,7 @@ import styles from './ProcessingScreen.module.css';
 const STAGES = [
   { label: 'Claude: análise da cena',    min: 0,  max: 12  },
   { label: 'Claude: recorte das layers', min: 12, max: 46  },
-  { label: 'Stability: preenchimento',   min: 46, max: 94  },
+  { label: 'Replicate: preenchimento',   min: 46, max: 94  },
   { label: 'Finalização',                min: 94, max: 100 },
 ];
 

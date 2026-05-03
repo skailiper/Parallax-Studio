@@ -77,7 +77,7 @@ export function UploadScreen({ numLayers, setNumLayers, onFile }) {
           {[
             ['01', 'Pinte os planos',    'Dê pinceladas grossas em cada profundidade da imagem'],
             ['02', 'Claude recorta',     'IA detecta bordas reais e separa com precisão de pixel'],
-            ['03', 'Stability preenche', 'Áreas vazias são geradas no mesmo estilo da imagem original'],
+            ['03', 'Replicate preenche', 'Áreas vazias são geradas no mesmo estilo da imagem original'],
           ].map(([n, title, desc]) => (
             <div key={n} className={styles.step}>
               <span className={styles.stepN}>{n}</span>

@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { resizeToFit, resizeToStability, buildSketchOverlay, buildInpaintMask, canvasToJpeg, canvasToPng, createCanvas } from '../lib/canvas';
+import { resizeToFit, resizeToReplicate, buildSketchOverlay, buildInpaintMask, canvasToJpeg, canvasToPng, createCanvas } from '../lib/canvas';
 import { createProject, updateProjectStatus, saveProjectLayers, logProcessingEvent } from '../lib/supabase';
 import { getSessionId } from '../lib/session';
 import { withRetry } from '../lib/retry';
@@ -219,9 +219,9 @@ Respond ONLY with valid JSON:
         if (projectId) await updateProjectStatus(projectId, 'inpainting');
         addLog('🎨 Replicate SDXL preenchendo fundo…', 'ai');
 
-        const { canvas: stableCanvas } = resizeToStability(imgEl.current);
-        const stableW = stableCanvas.width, stableH = stableCanvas.height;
-        const stableB64 = canvasToPng(stableCanvas);
+        const { canvas: inpaintCanvas } = resizeToReplicate(imgEl.current);
+        const inpaintW = inpaintCanvas.width, inpaintH = inpaintCanvas.height;
+        const inpaintB64 = canvasToPng(inpaintCanvas);
 
         for (let i = 0; i < cutouts.length; i++) {
           const co = cutouts[i];
@@ -242,9 +242,9 @@ Respond ONLY with valid JSON:
 
           addLog(`🖌️ Replicate SDXL: Layer ${i + 1}…`, 'ai');
 
-          // Build inpaint mask at stability resolution
-          const mResized = buildInpaintMask(maskRefs, i, stableW, stableH);
-          const md = mResized.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, stableW, stableH);
+          // Build inpaint mask at Replicate resolution
+          const mResized = buildInpaintMask(maskRefs, i, inpaintW, inpaintH);
+          const md = mResized.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, inpaintW, inpaintH);
           let hasArea = false;
           for (let p = 0; p < md.data.length; p += 4) if (md.data[p] > 128) { hasArea = true; break; }
 
@@ -273,7 +273,7 @@ Respond ONLY with valid JSON:
             try {
               const { imageBase64: resultB64 } = await withRetry(() => callReplicate({
                 type: 'inpaint',
-                imageBase64: stableB64,
+                imageBase64: inpaintB64,
                 maskBase64: canvasToPng(mResized),
                 prompt,
                 negativePrompt,
