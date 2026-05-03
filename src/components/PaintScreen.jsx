@@ -112,10 +112,13 @@ export function PaintScreen({
                 </button>
               ))}
             </div>
-            {tool === 'selector'
-              ? <div className={styles.shortcutHint}><span>{selecting ? '⏳ Selecionando…' : '🖱 Esq: selecionar · Dir: apagar'}</span></div>
-              : <div className={styles.shortcutHint}><span>🖱 Esq: pintar · Dir: apagar · Scroll: mover</span></div>
-            }
+            <div className={styles.shortcutHint}>
+              {tool === 'selector'
+                ? <span>{selecting ? '⏳ Selecionando…' : '🖱 Esq: selecionar · Dir: remover'}</span>
+                : <span>🖱 Esq: pintar · Dir: apagar · Scroll: mover</span>
+              }
+            </div>
+            <div className={styles.shortcutHint}><span>⌨ Ctrl+Z: desfazer</span></div>
           </div>
 
           <div className={styles.section}>

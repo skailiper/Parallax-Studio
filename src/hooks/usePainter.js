@@ -2,8 +2,8 @@ import { useRef, useEffect, useCallback, useState } from 'react';
 import { createCanvas } from '../lib/canvas';
 import { LAYER_COLORS } from './usePipeline';
 
-// Max resolution for click-select worker — 2048px for maximum precision
 const SELECT_MAX_PX = 2048;
+const MAX_UNDO      = 20;
 
 export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, showOrig }) {
   const canvasRef    = useRef(null);
@@ -15,6 +15,8 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
   const activeBtn    = useRef(0);
   const rafId        = useRef(null);
   const selectingRef = useRef(false);
+  const undoStack    = useRef([]);          // [{ layerIndex, data: ImageData }]
+
   const [selecting, setSelecting] = useState(false);
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -59,13 +61,43 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
     const W = img.naturalWidth, H = img.naturalHeight;
     maskRefs.current    = Array.from({ length: 8 }, () => createCanvas(W, H));
     overlayRefs.current = Array.from({ length: 8 }, () => createCanvas(W, H));
+    undoStack.current   = [];
     if (canvasRef.current) { canvasRef.current.width = W; canvasRef.current.height = H; }
     setTimeout(() => renderComposite(), 0);
   }, [renderComposite]);
 
   useEffect(() => { renderComposite(); }, [layerVis, showOrig, renderComposite]);
 
-  // ── Coordinates (accounts for CSS zoom) ───────────────────────────────────
+  // ── Undo ──────────────────────────────────────────────────────────────────
+  function saveUndoState(layerIndex) {
+    const mask = maskRefs.current[layerIndex];
+    if (!mask) return;
+    const data = mask.getContext('2d').getImageData(0, 0, mask.width, mask.height);
+    undoStack.current.push({ layerIndex, data });
+    if (undoStack.current.length > MAX_UNDO) undoStack.current.shift();
+  }
+
+  const undo = useCallback(() => {
+    if (undoStack.current.length === 0) return;
+    const { layerIndex, data } = undoStack.current.pop();
+    const mask = maskRefs.current[layerIndex];
+    if (!mask) return;
+    mask.getContext('2d').putImageData(data, 0, 0);
+    renderComposite();
+  }, [renderComposite]);
+
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [undo]);
+
+  // ── Coordinates ───────────────────────────────────────────────────────────
   function getPos(e) {
     const canvas = canvasRef.current;
     const rect   = canvas.getBoundingClientRect();
@@ -98,9 +130,6 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
   }
 
   // ── Click-to-select ────────────────────────────────────────────────────────
-  // Runs in a Web Worker at up to 2048px for maximum precision.
-  // Left-click: adds selection to layer mask.
-  // Right-click: removes selection from layer mask.
   async function doClickSelect(posX, posY, eraseMode, layer) {
     if (selectingRef.current) return;
     selectingRef.current = true;
@@ -115,28 +144,25 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
 
       const tmpC = createCanvas(sW, sH);
       tmpC.getContext('2d').drawImage(img, 0, 0, sW, sH);
-      const id = tmpC.getContext('2d').getImageData(0, 0, sW, sH);
-
-      const cX    = Math.max(0, Math.min(sW - 1, Math.round(posX * scale)));
-      const cY    = Math.max(0, Math.min(sH - 1, Math.round(posY * scale)));
-      const imgBuf = id.data.buffer.slice(0);
+      const id  = tmpC.getContext('2d').getImageData(0, 0, sW, sH);
+      const cX  = Math.max(0, Math.min(sW - 1, Math.round(posX * scale)));
+      const cY  = Math.max(0, Math.min(sH - 1, Math.round(posY * scale)));
+      const buf = id.data.buffer.slice(0);
 
       const alphaSmall = await new Promise((resolve, reject) => {
         const w = new Worker(new URL('../workers/alpha.worker.js', import.meta.url));
         w.onmessage = ({ data }) => { w.terminate(); resolve(new Float32Array(data.alphaBuffer)); };
         w.onerror   = (e)        => { w.terminate(); reject(new Error(e.message)); };
-        w.postMessage({ type: 'clickSelect', imgBuffer: imgBuf, W: sW, H: sH, clickX: cX, clickY: cY }, [imgBuf]);
+        w.postMessage({ type: 'clickSelect', imgBuffer: buf, W: sW, H: sH, clickX: cX, clickY: cY }, [buf]);
       });
 
-      // Paint result onto the layer mask
       const mask = maskRefs.current[layer];
       if (!mask) return;
-      const mCtx = mask.getContext('2d');
+      const mCtx  = mask.getContext('2d');
       const [r, g, b] = LAYER_COLORS[layer].rgb;
-
-      const aC   = createCanvas(sW, sH);
-      const aCtx = aC.getContext('2d');
-      const aImg = new ImageData(sW, sH);
+      const aC    = createCanvas(sW, sH);
+      const aCtx  = aC.getContext('2d');
+      const aImg  = new ImageData(sW, sH);
       for (let j = 0; j < alphaSmall.length; j++) {
         const v = Math.min(255, Math.round(Math.pow(alphaSmall[j], 0.55) * 255));
         aImg.data[j * 4]     = r;
@@ -153,7 +179,6 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
       } else {
         mCtx.drawImage(aC, 0, 0, W, H);
       }
-
       scheduleRender();
     } catch (err) {
       console.error('click-select failed:', err);
@@ -171,12 +196,13 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
     const pt = getPos(e);
 
     if (tool === 'selector') {
-      const eraseMode     = activeBtn.current === 2;
       const capturedLayer = activeLayer;
-      doClickSelect(pt.x, pt.y, eraseMode, capturedLayer);
+      saveUndoState(capturedLayer);
+      doClickSelect(pt.x, pt.y, activeBtn.current === 2, capturedLayer);
       return;
     }
 
+    saveUndoState(activeLayer);
     isPainting.current = true;
     lastPt.current     = pt;
     paintAt(pt.x, pt.y, effectiveTool(e), activeLayer);
@@ -205,12 +231,14 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
   }
 
   function clearLayer(i) {
+    saveUndoState(i);
     const m = maskRefs.current[i];
     if (m) m.getContext('2d').clearRect(0, 0, m.width, m.height);
     renderComposite();
   }
 
   function clearAll() {
+    for (let i = 0; i < numLayers; i++) saveUndoState(i);
     maskRefs.current.forEach(m => m?.getContext('2d').clearRect(0, 0, m.width, m.height));
     renderComposite();
   }
