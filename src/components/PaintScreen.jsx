@@ -141,7 +141,7 @@ export function PaintScreen({
               </span>
               <span
                 className={styles.toggleInfo}
-                title="Usa Stability AI para preencher automaticamente o fundo por trás de cada camada recortada, recriando a continuidade do que já existe na imagem. Desligado: gera apenas recortes transparentes, sem geração de conteúdo — mais rápido."
+                title="Usa Replicate (SAM2 + SDXL) para segmentar precisamente e preencher o fundo por trás de cada camada recortada. Desligado: gera apenas recortes transparentes, sem geração de conteúdo — mais rápido."
               >ⓘ</span>
             </div>
             <button

@@ -59,8 +59,8 @@ function sam2MaskToAlpha(maskBase64, w, h) {
     const img = new Image();
     img.onload = () => {
       const c = createCanvas(w, h);
-      c.getContext('2d').drawImage(img, 0, 0, w, h);
-      const id = c.getContext('2d').getImageData(0, 0, w, h);
+      c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, w, h);
+      const id = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, w, h);
       const alpha = new Float32Array(w * h);
       for (let i = 0; i < w * h; i++) alpha[i] = id.data[i * 4] / 255;
       resolve(alpha);
@@ -143,8 +143,8 @@ Respond ONLY with valid JSON:
 
         // Downscale mask and image for worker
         const smallMask = createCanvas(pW, pH);
-        smallMask.getContext('2d').drawImage(maskRefs[i], 0, 0, pW, pH);
-        const sd = smallMask.getContext('2d').getImageData(0, 0, pW, pH);
+        smallMask.getContext('2d', { willReadFrequently: true }).drawImage(maskRefs[i], 0, 0, pW, pH);
+        const sd = smallMask.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, pW, pH);
 
         // Quick painted-check on small data
         let painted = false;
@@ -176,8 +176,8 @@ Respond ONLY with valid JSON:
         if (!alphaSmall) {
           // Fallback: local edge-aware selection in Web Worker
           const smallImg = createCanvas(pW, pH);
-          smallImg.getContext('2d').drawImage(imgEl.current, 0, 0, pW, pH);
-          const imgSd = smallImg.getContext('2d').getImageData(0, 0, pW, pH);
+          smallImg.getContext('2d', { willReadFrequently: true }).drawImage(imgEl.current, 0, 0, pW, pH);
+          const imgSd = smallImg.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, pW, pH);
           const strokeBuffer = sd.data.buffer.slice(0);
           const imgBuffer    = imgSd.data.buffer.slice(0);
           alphaSmall = await runAlphaWorker({ strokeBuffer, imgBuffer, W: pW, H: pH });
@@ -185,7 +185,7 @@ Respond ONLY with valid JSON:
 
         // Convert Float32 alpha → RGBA canvas (GPU-upscaled to W×H later)
         const aCanvas = createCanvas(alphaW, alphaH);
-        const aCtx    = aCanvas.getContext('2d');
+        const aCtx    = aCanvas.getContext('2d', { willReadFrequently: true });
         const aImg    = new ImageData(alphaW, alphaH);
         for (let j = 0; j < alphaSmall.length; j++) {
           const v = Math.min(255, Math.round(Math.pow(alphaSmall[j], 0.6) * 255));
@@ -198,7 +198,7 @@ Respond ONLY with valid JSON:
 
         // GPU cutout: full-res image × upscaled alpha mask
         const cutoutCanvas = createCanvas(W, H);
-        const cCtx = cutoutCanvas.getContext('2d');
+        const cCtx = cutoutCanvas.getContext('2d', { willReadFrequently: true });
         cCtx.drawImage(imgEl.current, 0, 0);
         cCtx.globalCompositeOperation = 'destination-in';
         cCtx.drawImage(aCanvas, 0, 0, W, H); // GPU upscale
@@ -244,14 +244,14 @@ Respond ONLY with valid JSON:
 
           // Build inpaint mask at stability resolution
           const mResized = buildInpaintMask(maskRefs, i, stableW, stableH);
-          const md = mResized.getContext('2d').getImageData(0, 0, stableW, stableH);
+          const md = mResized.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, stableW, stableH);
           let hasArea = false;
           for (let p = 0; p < md.data.length; p += 4) if (md.data[p] > 128) { hasArea = true; break; }
 
           let inpaintedDataURL = null;
           if (hasArea) {
             // Build a highly specific prompt from the scene analysis.
-            // The goal: Stability AI should CONTINUE the existing background,
+            // The goal: Replicate SDXL should CONTINUE the existing background,
             // not invent new content. We describe exactly what's visible at the edges.
             const li = co.layerInfo;
             const behindDesc = li.behindDescription || '';

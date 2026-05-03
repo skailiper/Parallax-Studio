@@ -28,7 +28,7 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
       canvas.width  = img.naturalWidth;
       canvas.height = img.naturalHeight;
     }
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const W = canvas.width, H = canvas.height;
     ctx.clearRect(0, 0, W, H);
     ctx.drawImage(img, 0, 0, W, H);
@@ -38,7 +38,7 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
       if (!layerVis[i]) continue;
       const mask    = maskRefs.current[i];    if (!mask)    continue;
       const overlay = overlayRefs.current[i]; if (!overlay) continue;
-      const oCtx = overlay.getContext('2d');
+      const oCtx = overlay.getContext('2d', { willReadFrequently: true });
       oCtx.clearRect(0, 0, W, H);
       const [r, g, b] = LAYER_COLORS[i].rgb;
       oCtx.fillStyle = `rgba(${r},${g},${b},0.58)`;
@@ -72,7 +72,7 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
   function saveUndoState(layerIndex) {
     const mask = maskRefs.current[layerIndex];
     if (!mask) return;
-    const data = mask.getContext('2d').getImageData(0, 0, mask.width, mask.height);
+    const data = mask.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, mask.width, mask.height);
     undoStack.current.push({ layerIndex, data });
     if (undoStack.current.length > MAX_UNDO) undoStack.current.shift();
   }
@@ -82,7 +82,7 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
     const { layerIndex, data } = undoStack.current.pop();
     const mask = maskRefs.current[layerIndex];
     if (!mask) return;
-    mask.getContext('2d').putImageData(data, 0, 0);
+    mask.getContext('2d', { willReadFrequently: true }).putImageData(data, 0, 0);
     renderComposite();
   }, [renderComposite]);
 
@@ -115,7 +115,7 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
 
   function paintAt(x, y, t, layer) {
     const mask = maskRefs.current[layer]; if (!mask) return;
-    const ctx  = mask.getContext('2d');
+    const ctx  = mask.getContext('2d', { willReadFrequently: true });
     if (t === 'brush') {
       const [r, g, b] = LAYER_COLORS[layer].rgb;
       ctx.globalCompositeOperation = 'source-over';
@@ -143,8 +143,8 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
       const sW = Math.round(W * scale), sH = Math.round(H * scale);
 
       const tmpC = createCanvas(sW, sH);
-      tmpC.getContext('2d').drawImage(img, 0, 0, sW, sH);
-      const id  = tmpC.getContext('2d').getImageData(0, 0, sW, sH);
+      tmpC.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, sW, sH);
+      const id  = tmpC.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, sW, sH);
       const cX  = Math.max(0, Math.min(sW - 1, Math.round(posX * scale)));
       const cY  = Math.max(0, Math.min(sH - 1, Math.round(posY * scale)));
       const buf = id.data.buffer.slice(0);
@@ -158,10 +158,10 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
 
       const mask = maskRefs.current[layer];
       if (!mask) return;
-      const mCtx  = mask.getContext('2d');
+      const mCtx  = mask.getContext('2d', { willReadFrequently: true });
       const [r, g, b] = LAYER_COLORS[layer].rgb;
       const aC    = createCanvas(sW, sH);
-      const aCtx  = aC.getContext('2d');
+      const aCtx  = aC.getContext('2d', { willReadFrequently: true });
       const aImg  = new ImageData(sW, sH);
       for (let j = 0; j < alphaSmall.length; j++) {
         const v = Math.min(255, Math.round(Math.pow(alphaSmall[j], 0.55) * 255));
@@ -233,13 +233,13 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
   function clearLayer(i) {
     saveUndoState(i);
     const m = maskRefs.current[i];
-    if (m) m.getContext('2d').clearRect(0, 0, m.width, m.height);
+    if (m) m.getContext('2d', { willReadFrequently: true }).clearRect(0, 0, m.width, m.height);
     renderComposite();
   }
 
   function clearAll() {
     for (let i = 0; i < numLayers; i++) saveUndoState(i);
-    maskRefs.current.forEach(m => m?.getContext('2d').clearRect(0, 0, m.width, m.height));
+    maskRefs.current.forEach(m => m?.getContext('2d', { willReadFrequently: true }).clearRect(0, 0, m.width, m.height));
     renderComposite();
   }
 

@@ -12,41 +12,33 @@ function setCors(req, res) {
   res.setHeader('Vary', 'Origin');
 }
 
-async function replicateUpload(buffer, contentType) {
-  const res = await fetch('https://api.replicate.com/v1/files', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.REPLICATE_KEY}`,
-      'Content-Type': contentType,
-      'Content-Length': String(buffer.length),
-    },
-    body: buffer,
-  });
-  if (!res.ok) throw new Error(`Replicate upload: ${res.status} — ${await res.text()}`);
-  const json = await res.json();
-  return json.urls.get;
-}
-
+// POST to /v1/models/{owner}/{name}/predictions then poll /v1/predictions/{id}
 async function replicateRun(model, input) {
   const key = process.env.REPLICATE_KEY;
 
   let res = await fetch(`https://api.replicate.com/v1/models/${model}/predictions`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${key}`,
+      Authorization: `Token ${key}`,
       'Content-Type': 'application/json',
-      Prefer: 'wait=60',
     },
     body: JSON.stringify({ input }),
   });
 
-  if (!res.ok) throw new Error(`Replicate create: ${res.status} — ${await res.text()}`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Replicate create (${model}): ${res.status} — ${text}`);
+  }
+
   let pred = await res.json();
 
+  // Poll /v1/predictions/{id} until terminal state
   const deadline = Date.now() + 270_000;
   while ((pred.status === 'starting' || pred.status === 'processing') && Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 3000));
-    res = await fetch(pred.urls.get, { headers: { Authorization: `Bearer ${key}` } });
+    await new Promise(r => setTimeout(r, 2500));
+    res = await fetch(`https://api.replicate.com/v1/predictions/${pred.id}`, {
+      headers: { Authorization: `Token ${key}` },
+    });
     if (!res.ok) break;
     pred = await res.json();
   }
@@ -77,9 +69,8 @@ module.exports = async function handler(req, res) {
       if (!imageBase64 || !Array.isArray(points) || points.length === 0)
         return res.status(400).json({ error: 'imageBase64 and points required' });
 
-      const imageUrl = await replicateUpload(Buffer.from(imageBase64, 'base64'), 'image/jpeg');
-      const output = await replicateRun('meta/sam-2', {
-        image: imageUrl,
+      const output = await replicateRun('facebook/sam-2', {
+        image: `data:image/jpeg;base64,${imageBase64}`,
         points: JSON.stringify(points),
         point_labels: JSON.stringify(pointLabels ?? points.map(() => 1)),
         multimask_output: false,
@@ -91,18 +82,13 @@ module.exports = async function handler(req, res) {
 
     // ── SDXL inpainting ────────────────────────────────────────────────────────
     if (type === 'inpaint') {
-      const { imageBase64, maskBase64, prompt, negativePrompt, strength = 0.60, steps = 30 } = req.body;
-      if (!imageBase64 || !maskBase64)
+      const { imageBase64, maskBase64: maskB64, prompt, negativePrompt, strength = 0.60, steps = 30 } = req.body;
+      if (!imageBase64 || !maskB64)
         return res.status(400).json({ error: 'imageBase64 and maskBase64 required' });
 
-      const [imageUrl, maskUrl] = await Promise.all([
-        replicateUpload(Buffer.from(imageBase64, 'base64'), 'image/jpeg'),
-        replicateUpload(Buffer.from(maskBase64,  'base64'), 'image/png'),
-      ]);
-
       const output = await replicateRun('stability-ai/stable-diffusion-inpainting', {
-        image: imageUrl,
-        mask_image: maskUrl,
+        image:      `data:image/jpeg;base64,${imageBase64}`,
+        mask_image: `data:image/png;base64,${maskB64}`,
         prompt: prompt || 'seamless natural background, photorealistic, highly detailed',
         negative_prompt: negativePrompt || 'blurry, artifacts, low quality, watermark, text',
         num_inference_steps: Math.round(steps),

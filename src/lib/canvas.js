@@ -12,7 +12,7 @@ export function resizeToFit(img, maxPx = 900) {
   const scale = Math.min(1, maxPx / Math.max(img.naturalWidth, img.naturalHeight));
   const w = Math.round(img.naturalWidth * scale), h = Math.round(img.naturalHeight * scale);
   const c = createCanvas(w, h);
-  c.getContext('2d').drawImage(img, 0, 0, w, h);
+  c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, w, h);
   return { canvas: c, w, h, scale };
 }
 export function resizeToStability(img) {
@@ -21,18 +21,18 @@ export function resizeToStability(img) {
   const w = Math.round(img.naturalWidth * scale / 64) * 64;
   const h = Math.round(img.naturalHeight * scale / 64) * 64;
   const c = createCanvas(w, h);
-  c.getContext('2d').drawImage(img, 0, 0, w, h);
+  c.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0, w, h);
   return { canvas: c, w, h };
 }
 
 // GPU compositing — no pixel loops
 export function buildSketchOverlay(img, maskCanvases, numLayers, COLORS, tw, th) {
   const c = createCanvas(tw, th);
-  const ctx = c.getContext('2d');
+  const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(img, 0, 0, tw, th);
   for (let i = 0; i < numLayers; i++) {
     const tmp = createCanvas(tw, th);
-    const tCtx = tmp.getContext('2d');
+    const tCtx = tmp.getContext('2d', { willReadFrequently: true });
     const [r, g, b] = COLORS[i].rgb;
     tCtx.fillStyle = `rgba(${r},${g},${b},0.78)`;
     tCtx.fillRect(0, 0, tw, th);
@@ -47,12 +47,12 @@ export function buildSketchOverlay(img, maskCanvases, numLayers, COLORS, tw, th)
 // GPU compositing — single getImageData only for final threshold
 export function buildInpaintMask(maskCanvases, layerIdx, W, H) {
   const c = createCanvas(W, H);
-  const ctx = c.getContext('2d');
+  const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.fillStyle = 'black';
   ctx.fillRect(0, 0, W, H);
   for (let j = 0; j < layerIdx; j++) {
     const tmp = createCanvas(W, H);
-    const tCtx = tmp.getContext('2d');
+    const tCtx = tmp.getContext('2d', { willReadFrequently: true });
     tCtx.fillStyle = 'white';
     tCtx.fillRect(0, 0, W, H);
     tCtx.globalCompositeOperation = 'destination-in';
@@ -61,7 +61,7 @@ export function buildInpaintMask(maskCanvases, layerIdx, W, H) {
     ctx.drawImage(tmp, 0, 0);
   }
   const fc = createCanvas(W, H);
-  const fCtx = fc.getContext('2d');
+  const fCtx = fc.getContext('2d', { willReadFrequently: true });
   fCtx.filter = 'blur(10px)'; fCtx.drawImage(c, 0, 0); fCtx.filter = 'none';
   const fd = fCtx.getImageData(0, 0, W, H);
   for (let p = 0; p < fd.data.length; p += 4) {
