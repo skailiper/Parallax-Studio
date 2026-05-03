@@ -1,14 +1,61 @@
+import { useRef, useEffect } from 'react';
 import { LAYER_COLORS } from '../hooks/usePipeline';
 import styles from './PaintScreen.module.css';
 
-export function PaintScreen({ imgFile, imgEl, numLayers, activeLayer, setActiveLayer, tool, setTool, brushSize, setBrushSize, layerVis, setLayerVis, showOrig, setShowOrig, zoom, setZoom, canvasRef, onDown, onMove, onUp, clearLayer, onProcess }) {
-  const col = LAYER_COLORS[activeLayer];
-  const sz  = brushSize;
+export function PaintScreen({
+  imgFile, imgEl, numLayers, activeLayer, setActiveLayer,
+  tool, setTool, brushSize, setBrushSize,
+  layerVis, setLayerVis, showOrig, setShowOrig,
+  zoom, setZoom, canvasRef,
+  onDown, onMove, onUp, clearLayer, onProcess,
+}) {
+  const col       = LAYER_COLORS[activeLayer];
+  const sz        = brushSize;
+  const scrollRef = useRef(null);
+  const panRef    = useRef(null);
 
+  // ── Cursor SVG ────────────────────────────────────────────────────────────
   const cursorSVG = tool === 'brush'
     ? `<svg xmlns='http://www.w3.org/2000/svg' width='${sz*2}' height='${sz*2}'><circle cx='${sz}' cy='${sz}' r='${sz-1}' fill='${encodeURIComponent(col.hex)}' fill-opacity='.28' stroke='white' stroke-width='1.5'/></svg>`
     : `<svg xmlns='http://www.w3.org/2000/svg' width='${sz*3}' height='${sz*3}'><circle cx='${sz*1.5}' cy='${sz*1.5}' r='${sz*1.5-1}' fill='none' stroke='%23ff5f57' stroke-width='1.5' stroke-dasharray='4,3'/></svg>`;
   const cursor = `url("data:image/svg+xml,${cursorSVG}") ${tool === 'brush' ? sz : sz*1.5} ${tool === 'brush' ? sz : sz*1.5}, crosshair`;
+
+  // ── Scroll-wheel → pan (non-passive so preventDefault works) ─────────────
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      el.scrollLeft += e.deltaX;
+      el.scrollTop  += e.deltaY;
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  // ── Middle-mouse-button drag → pan ────────────────────────────────────────
+  function onScrollPointerDown(e) {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    panRef.current = {
+      x: e.clientX, y: e.clientY,
+      sl: scrollRef.current.scrollLeft,
+      st: scrollRef.current.scrollTop,
+    };
+    scrollRef.current.setPointerCapture(e.pointerId);
+  }
+
+  function onScrollPointerMove(e) {
+    if (!panRef.current) return;
+    const dx = e.clientX - panRef.current.x;
+    const dy = e.clientY - panRef.current.y;
+    scrollRef.current.scrollLeft = panRef.current.sl - dx;
+    scrollRef.current.scrollTop  = panRef.current.st - dy;
+  }
+
+  function onScrollPointerUp(e) {
+    if (e.button === 1) panRef.current = null;
+  }
 
   return (
     <div className={styles.root}>
@@ -37,7 +84,7 @@ export function PaintScreen({ imgFile, imgEl, numLayers, activeLayer, setActiveL
               >
                 <div className={styles.layerDot} style={{ background: LAYER_COLORS[i].hex }} />
                 <span className={styles.layerName} style={{ color: activeLayer === i ? '#fff' : '#666' }}>Layer {i+1}</span>
-                <button className={styles.iconBtn} onClick={e => { e.stopPropagation(); setLayerVis(v => { const n = [...v]; n[i] = !n[i]; return n; }); }}>
+                <button className={styles.iconBtn} onClick={e => { e.stopPropagation(); setLayerVis(v => { const n=[...v]; n[i]=!n[i]; return n; }); }}>
                   {layerVis[i] ? '◉' : '○'}
                 </button>
                 <button className={styles.iconBtn} style={{ opacity: 0.45 }} onClick={e => { e.stopPropagation(); clearLayer(i); }}>✕</button>
@@ -50,12 +97,15 @@ export function PaintScreen({ imgFile, imgEl, numLayers, activeLayer, setActiveL
           <div className={styles.section}>
             <div className={styles.sLabel}>FERRAMENTA</div>
             <div className={styles.toolRow}>
-              {[['brush', '✦', 'Pincel'], ['eraser', '◻', 'Borracha']].map(([id, ico, lbl]) => (
-                <button key={id} className={`${styles.toolBtn} ${tool === id ? styles.toolBtnOn : ''}`} onClick={() => setTool(id)}>
+              {[['brush','✦','Pincel'],['eraser','◻','Borracha']].map(([id,ico,lbl]) => (
+                <button key={id} className={`${styles.toolBtn} ${tool===id ? styles.toolBtnOn : ''}`} onClick={() => setTool(id)}>
                   <span className={styles.toolIco}>{ico}</span>
                   <span className={styles.toolLbl}>{lbl}</span>
                 </button>
               ))}
+            </div>
+            <div className={styles.shortcutHint}>
+              <span>🖱 Esq: pintar &nbsp;·&nbsp; Dir: apagar &nbsp;·&nbsp; Scroll: mover</span>
             </div>
           </div>
 
@@ -63,15 +113,17 @@ export function PaintScreen({ imgFile, imgEl, numLayers, activeLayer, setActiveL
             <div className={styles.sLabel}>TAMANHO — {brushSize}px</div>
             <input type="range" min={4} max={120} value={brushSize} onChange={e => setBrushSize(+e.target.value)} className={styles.range} />
             <div className={styles.sizeBtns}>
-              {[10, 28, 56, 100].map(s => (
-                <button key={s} className={`${styles.sizeBtn} ${brushSize === s ? styles.sizeBtnOn : ''}`} onClick={() => setBrushSize(s)}>{s}</button>
+              {[10,28,56,100].map(s => (
+                <button key={s} className={`${styles.sizeBtn} ${brushSize===s ? styles.sizeBtnOn : ''}`} onClick={() => setBrushSize(s)}>{s}</button>
               ))}
             </div>
           </div>
 
           <div className={styles.divider} />
 
-          <button className={styles.origBtn} onMouseDown={() => setShowOrig(true)} onMouseUp={() => setShowOrig(false)} onTouchStart={() => setShowOrig(true)} onTouchEnd={() => setShowOrig(false)}>
+          <button className={styles.origBtn}
+            onMouseDown={() => setShowOrig(true)} onMouseUp={() => setShowOrig(false)}
+            onTouchStart={() => setShowOrig(true)} onTouchEnd={() => setShowOrig(false)}>
             ◎ Segurar: ver original
           </button>
 
@@ -90,9 +142,9 @@ export function PaintScreen({ imgFile, imgEl, numLayers, activeLayer, setActiveL
         <div className={styles.topBar}>
           <span className={styles.fileMeta}>{imgFile?.name} · {imgEl.current?.naturalWidth}×{imgEl.current?.naturalHeight}px</span>
           <div className={styles.zoomRow}>
-            <button className={styles.zBtn} onClick={() => setZoom(z => Math.max(0.1, +(z - .1).toFixed(2)))}>−</button>
-            <span className={styles.zVal}>{Math.round(zoom * 100)}%</span>
-            <button className={styles.zBtn} onClick={() => setZoom(z => Math.min(6, +(z + .1).toFixed(2)))}>+</button>
+            <button className={styles.zBtn} onClick={() => setZoom(z => Math.max(0.1, +(z-.1).toFixed(2)))}>−</button>
+            <span className={styles.zVal}>{Math.round(zoom*100)}%</span>
+            <button className={styles.zBtn} onClick={() => setZoom(z => Math.min(6, +(z+.1).toFixed(2)))}>+</button>
             <button className={styles.zBtn} onClick={() => setZoom(1)}>⊡</button>
           </div>
           <div className={styles.activeBadge} style={{ borderColor: col.hex + '66' }}>
@@ -101,22 +153,38 @@ export function PaintScreen({ imgFile, imgEl, numLayers, activeLayer, setActiveL
           </div>
         </div>
 
-        <div className={styles.canvasScroll}>
+        {/* scroll container — handles wheel-pan and middle-mouse-pan */}
+        <div
+          ref={scrollRef}
+          className={styles.canvasScroll}
+          onPointerDown={onScrollPointerDown}
+          onPointerMove={onScrollPointerMove}
+          onPointerUp={onScrollPointerUp}
+        >
           <div className={styles.canvasWrap} style={{ transform: `scale(${zoom})` }}>
-            <canvas ref={canvasRef} style={{ display: 'block', cursor, touchAction: 'none', userSelect: 'none' }}
-              onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
-              onTouchStart={onDown} onTouchMove={onMove} onTouchEnd={onUp} />
+            <canvas
+              ref={canvasRef}
+              style={{ display: 'block', cursor, touchAction: 'none', userSelect: 'none' }}
+              onMouseDown={onDown}
+              onMouseMove={onMove}
+              onMouseUp={onUp}
+              onMouseLeave={onUp}
+              onContextMenu={e => e.preventDefault()}
+              onTouchStart={onDown}
+              onTouchMove={onMove}
+              onTouchEnd={onUp}
+            />
           </div>
         </div>
 
         <div className={styles.legend}>
           {Array.from({ length: numLayers }).map((_, i) => (
-            <div key={i} className={styles.legendItem} style={{ opacity: activeLayer === i ? 1 : 0.3 }} onClick={() => setActiveLayer(i)}>
+            <div key={i} className={styles.legendItem} style={{ opacity: activeLayer===i ? 1 : 0.3 }} onClick={() => setActiveLayer(i)}>
               <div className={styles.legendDot} style={{ background: LAYER_COLORS[i].hex }} />L{i+1}
             </div>
           ))}
           <span className={styles.legendSpacer} />
-          <span className={styles.legendHint}>Pinceladas grossas estão ok</span>
+          <span className={styles.legendHint}>Esq: pintar · Dir: apagar · Scroll: mover</span>
         </div>
       </div>
     </div>
