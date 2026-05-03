@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
-import { resizeToFit, resizeToReplicate, buildSketchOverlay, buildInpaintMask, canvasToJpeg, canvasToPng, createCanvas } from '../lib/canvas';
-import { createProject, updateProjectStatus, saveProjectLayers, logProcessingEvent } from '../lib/supabase';
+import { resizeToFit, resizeToReplicate, buildInpaintMask, canvasToJpeg, canvasToPng, createCanvas } from '../lib/canvas';
+import { createProject, updateProjectStatus, saveProjectLayers } from '../lib/supabase';
 import { getSessionId } from '../lib/session';
 import { withRetry } from '../lib/retry';
 
@@ -15,13 +15,6 @@ export const LAYER_COLORS = [
   { hex: '#FF6BCA', name: 'Layer 8', rgb: [255, 107, 202] },
 ];
 
-async function callClaude(body) {
-  const res = await fetch('/api/claude', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Claude error');
-  return data.content.map(b => b.text || '').join('').replace(/```json|```/g, '').trim();
-}
-
 async function callReplicate(body) {
   const res = await fetch('/api/replicate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const data = await res.json();
@@ -32,7 +25,7 @@ async function callReplicate(body) {
 function retryOpts(addLog, label) {
   return {
     attempts: 3,
-    baseDelayMs: 1000,
+    baseDelayMs: 2000,
     onRetry: (err, attempt) => addLog(`⟳ ${label} — tentativa ${attempt + 1}/3: ${err.message}`, 'warn'),
   };
 }
@@ -103,55 +96,28 @@ export function usePipeline() {
     const procScale = Math.min(1, MAX_PROC / Math.max(W, H));
     const pW = Math.round(W * procScale), pH = Math.round(H * procScale);
 
+    // Thumbnail used for SAM2 point prompts
+    const { canvas: thumb, w: tw, h: th } = resizeToFit(imgEl.current, 800);
+    const origB64 = canvasToJpeg(thumb, 0.85);
+
     try {
-      // ── Step 1: Scene analysis ──────────────────────────────────────────────
-      addLog('🔍 Claude analisando cena…', 'ai');
-      const { canvas: thumb, w: tw, h: th } = resizeToFit(imgEl.current, 800);
-      const origB64   = canvasToJpeg(thumb, 0.85);
-      const sketchB64 = canvasToJpeg(buildSketchOverlay(imgEl.current, maskRefs, numLayers, LAYER_COLORS, tw, th), 0.85);
-
-      let analysis = { imageStyle: 'photograph', scene: '', mood: '', layers: [] };
-      try {
-        const raw = await withRetry(() => callClaude({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 2000,
-          messages: [{ role: 'user', content: [
-            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: origB64 } },
-            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: sketchB64 } },
-            { type: 'text', text: `Image 1: the original scene. Image 2: rough brush strokes indicating ${numLayers} parallax layers (${LAYER_COLORS.slice(0, numLayers).map((c, i) => `L${i+1}=${c.hex}`).join(', ')}). L1=frontmost, L${numLayers}=background.
-
-Analyze the scene thoroughly. Pay attention to:
-- Overall mood, lighting, color palette, and atmosphere
-- What each painted layer represents
-- What background content would be VISIBLE behind each painted object (what is already partially visible at its edges)
-
-Respond ONLY with valid JSON:
-{"imageStyle":"photograph|painting|illustration","scene":"detailed scene description","mood":"precise lighting and atmosphere description — colors, temperature, brightness","palette":"dominant colors as hex codes e.g. #1a2b3c, #4d5e6f","layers":[{"index":0,"elements":["specific object names"],"depth":"foreground|midground|background","behindDescription":"what is ALREADY VISIBLE at the edges of this object in the original image — describe exact colors, textures, patterns seen there"}]}` },
-          ]}],
-        }), retryOpts(addLog, 'Análise de cena'));
-        analysis = JSON.parse(raw);
-        addLog(`✅ Cena: ${analysis.scene?.slice(0, 60)}`, 'success');
-        if (projectId) await logProcessingEvent(projectId, 'scene_analyzed', { style: analysis.imageStyle });
-      } catch { addLog('⚠️ Análise parcial — continuando', 'warn'); }
-      setProgress(12);
-
-      // ── Step 2: Per-layer cutout (edge-aware selection) ─────────────────────
+      // ── Step 1: Per-layer cutout (SAM2 + edge-aware fallback) ──────────────
+      addLog('✂️ Iniciando segmentação das layers…', 'ai');
       const cutouts = [];
       for (let i = 0; i < numLayers; i++) {
-        const li = analysis.layers?.find(l => l.index === i) || {};
-        addLog(`✂️ Recortando Layer ${i + 1}${li.elements?.length ? ` — ${li.elements.join(', ')}` : ''} …`, 'ai');
+        addLog(`✂️ Recortando Layer ${i + 1}…`, 'ai');
 
-        // Downscale mask and image for worker
+        // Downscale mask for worker
         const smallMask = createCanvas(pW, pH);
         smallMask.getContext('2d', { willReadFrequently: true }).drawImage(maskRefs[i], 0, 0, pW, pH);
         const sd = smallMask.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, pW, pH);
 
-        // Quick painted-check on small data
+        // Quick painted-check
         let painted = false;
         for (let p = 3; p < sd.data.length; p += 4) if (sd.data[p] > 10) { painted = true; break; }
         if (!painted) { addLog(`⚪ Layer ${i + 1} sem pintura, pulando`, 'warn'); cutouts.push(null); continue; }
 
-        // Try SAM2 for precise segmentation (when generative AI is enabled)
+        // Try SAM2 for precise segmentation
         let alphaSmall = null;
         let alphaW = pW, alphaH = pH;
 
@@ -201,23 +167,23 @@ Respond ONLY with valid JSON:
         const cCtx = cutoutCanvas.getContext('2d', { willReadFrequently: true });
         cCtx.drawImage(imgEl.current, 0, 0);
         cCtx.globalCompositeOperation = 'destination-in';
-        cCtx.drawImage(aCanvas, 0, 0, W, H); // GPU upscale
+        cCtx.drawImage(aCanvas, 0, 0, W, H);
         cCtx.globalCompositeOperation = 'source-over';
 
-        cutouts.push({ index: i, cutoutCanvas, layerInfo: li });
-        setProgress(12 + Math.round(((i + 1) / numLayers) * 34));
+        cutouts.push({ index: i, cutoutCanvas });
+        setProgress(Math.round(((i + 1) / numLayers) * 46));
         addLog(`   ✅ Layer ${i + 1} recortada`, 'success');
         await new Promise(r => setTimeout(r, 20));
       }
 
       setProgress(46);
 
-      // ── Step 3: Inpainting (Replicate Flux Fill Pro) ───────────────────────
+      // ── Step 2: Inpainting (SDXL via Replicate) ────────────────────────────
       const results = [];
 
       if (useGenerativeAI) {
         if (projectId) await updateProjectStatus(projectId, 'inpainting');
-        addLog('🎨 Replicate Flux Fill Pro preenchendo fundo…', 'ai');
+        addLog('🎨 SDXL Inpainting preenchendo fundo…', 'ai');
 
         const { canvas: inpaintCanvas } = resizeToReplicate(imgEl.current);
         const inpaintW = inpaintCanvas.width, inpaintH = inpaintCanvas.height;
@@ -227,12 +193,11 @@ Respond ONLY with valid JSON:
           const co = cutouts[i];
           if (!co) { results.push(null); continue; }
 
-          // Layer 1 (index 0) is the frontmost — no inpainting needed
+          // Layer 1 (frontmost) — no inpainting needed
           if (i === 0) {
             addLog(`   ℹ️ Layer 1 é frontal — sem inpainting`, 'info');
             results.push({
-              index: i, label: `Layer ${i + 1}`, color: LAYER_COLORS[i].hex,
-              elements: co.layerInfo?.elements || [],
+              index: i, label: `Layer ${i + 1}`, color: LAYER_COLORS[i].hex, elements: [],
               cutoutDataURL: co.cutoutCanvas.toDataURL('image/png'),
               inpaintedDataURL: null, hasInpaint: false,
             });
@@ -240,7 +205,7 @@ Respond ONLY with valid JSON:
             continue;
           }
 
-          addLog(`🖌️ Flux Fill Pro: Layer ${i + 1}…`, 'ai');
+          addLog(`🖌️ SDXL Inpainting: Layer ${i + 1}…`, 'ai');
 
           // Build inpaint mask at Replicate resolution
           const mResized = buildInpaintMask(maskRefs, i, inpaintW, inpaintH);
@@ -250,16 +215,8 @@ Respond ONLY with valid JSON:
 
           let inpaintedDataURL = null;
           if (hasArea) {
-            // Build a specific prompt so Flux Fill Pro continues the existing
-            // background instead of inventing new content.
-            const li = co.layerInfo;
-            const behindDesc = li.behindDescription || '';
-            const sceneCtx   = [analysis.scene, analysis.mood].filter(Boolean).join(', ');
-            const palette     = analysis.palette ? `Color palette: ${analysis.palette}.` : '';
-
-            const prompt = behindDesc
-              ? `Seamlessly extend and fill: ${behindDesc}. Scene context: ${sceneCtx}. ${palette} Match existing colors, lighting, and texture exactly. No new objects. Photorealistic continuation only.`
-              : `Seamless background fill matching this scene: ${sceneCtx}. ${palette} Continue existing background with same lighting, colors, and atmosphere. No new objects or subjects.`;
+            const prompt = 'Seamless photorealistic background continuation. Match existing colors, lighting, and textures exactly. No new objects or subjects.';
+            const negativePrompt = 'blurry, artifacts, low quality, watermark, text, new objects, people, different style';
 
             try {
               const { imageBase64: resultB64 } = await withRetry(() => callReplicate({
@@ -267,7 +224,9 @@ Respond ONLY with valid JSON:
                 imageBase64: inpaintB64,
                 maskBase64: canvasToPng(mResized),
                 prompt,
-                steps: 28,
+                negativePrompt,
+                strength: 0.60,
+                steps: 30,
               }), retryOpts(addLog, `Inpainting L${i + 1}`));
               inpaintedDataURL = `data:image/png;base64,${resultB64}`;
               addLog(`   ✅ Layer ${i + 1} preenchida`, 'success');
@@ -275,8 +234,7 @@ Respond ONLY with valid JSON:
           } else { addLog(`   Layer ${i + 1}: sem área para preencher`, 'info'); }
 
           results.push({
-            index: i, label: `Layer ${i + 1}`, color: LAYER_COLORS[i].hex,
-            elements: co.layerInfo?.elements || [],
+            index: i, label: `Layer ${i + 1}`, color: LAYER_COLORS[i].hex, elements: [],
             cutoutDataURL: co.cutoutCanvas.toDataURL('image/png'),
             inpaintedDataURL, hasInpaint: !!inpaintedDataURL,
           });
@@ -290,8 +248,7 @@ Respond ONLY with valid JSON:
           const co = cutouts[i];
           if (!co) { results.push(null); continue; }
           results.push({
-            index: i, label: `Layer ${i + 1}`, color: LAYER_COLORS[i].hex,
-            elements: co.layerInfo?.elements || [],
+            index: i, label: `Layer ${i + 1}`, color: LAYER_COLORS[i].hex, elements: [],
             cutoutDataURL: co.cutoutCanvas.toDataURL('image/png'),
             inpaintedDataURL: null, hasInpaint: false,
           });

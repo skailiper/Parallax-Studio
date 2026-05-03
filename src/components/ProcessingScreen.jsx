@@ -2,10 +2,9 @@ import { useEffect, useRef } from 'react';
 import styles from './ProcessingScreen.module.css';
 
 const STAGES = [
-  { label: 'Claude: análise da cena',    min: 0,  max: 12  },
-  { label: 'Claude: recorte das layers', min: 12, max: 46  },
-  { label: 'Replicate: preenchimento',   min: 46, max: 94  },
-  { label: 'Finalização',                min: 94, max: 100 },
+  { label: 'SAM2: segmentação das layers', min: 0,  max: 46  },
+  { label: 'SDXL: preenchimento',          min: 46, max: 94  },
+  { label: 'Finalização',                  min: 94, max: 100 },
 ];
 
 const LOG_CLASS = {
