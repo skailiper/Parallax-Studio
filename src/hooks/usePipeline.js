@@ -22,11 +22,11 @@ async function callClaude(body) {
   return data.content.map(b => b.text || '').join('').replace(/```json|```/g, '').trim();
 }
 
-async function callStability(body) {
-  const res = await fetch('/api/stability', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+async function callReplicate(body) {
+  const res = await fetch('/api/replicate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Stability error');
-  return `data:image/png;base64,${data.imageBase64}`;
+  if (!res.ok) throw new Error(data.error || 'Replicate error');
+  return data;
 }
 
 function retryOpts(addLog, label) {
@@ -35,6 +35,39 @@ function retryOpts(addLog, label) {
     baseDelayMs: 1000,
     onRetry: (err, attempt) => addLog(`⟳ ${label} — tentativa ${attempt + 1}/3: ${err.message}`, 'warn'),
   };
+}
+
+// Extract evenly-spaced foreground points from a painted mask for SAM2.
+function extractSAM2Points(sd, pW, pH, tw, th, maxPoints = 6) {
+  const painted = [];
+  for (let y = 3; y < pH - 3; y += 4) {
+    for (let x = 3; x < pW - 3; x += 4) {
+      if (sd.data[(y * pW + x) * 4 + 3] > 64) {
+        painted.push([Math.round(x * tw / pW), Math.round(y * th / pH)]);
+      }
+    }
+  }
+  if (painted.length === 0) return null;
+  const stride = Math.max(1, Math.floor(painted.length / maxPoints));
+  const pts = painted.filter((_, i) => i % stride === 0).slice(0, maxPoints);
+  return { points: pts, pointLabels: pts.map(() => 1) };
+}
+
+// Decode a base64 PNG mask (from SAM2) into a Float32Array alpha at w×h.
+function sam2MaskToAlpha(maskBase64, w, h) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = createCanvas(w, h);
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      const id = c.getContext('2d').getImageData(0, 0, w, h);
+      const alpha = new Float32Array(w * h);
+      for (let i = 0; i < w * h; i++) alpha[i] = id.data[i * 4] / 255;
+      resolve(alpha);
+    };
+    img.onerror = reject;
+    img.src = `data:image/png;base64,${maskBase64}`;
+  });
 }
 
 // Runs edge-aware selection in a Web Worker so the main thread stays free.
@@ -118,22 +151,43 @@ Respond ONLY with valid JSON:
         for (let p = 3; p < sd.data.length; p += 4) if (sd.data[p] > 10) { painted = true; break; }
         if (!painted) { addLog(`⚪ Layer ${i + 1} sem pintura, pulando`, 'warn'); cutouts.push(null); continue; }
 
-        // Downscale original image for gradient-based edge detection
-        const smallImg = createCanvas(pW, pH);
-        smallImg.getContext('2d').drawImage(imgEl.current, 0, 0, pW, pH);
-        const imgSd = smallImg.getContext('2d').getImageData(0, 0, pW, pH);
+        // Try SAM2 for precise segmentation (when generative AI is enabled)
+        let alphaSmall = null;
+        let alphaW = pW, alphaH = pH;
 
-        // Edge-aware selection in worker (main thread stays free)
-        const strokeBuffer = sd.data.buffer.slice(0);
-        const imgBuffer    = imgSd.data.buffer.slice(0);
-        const alphaSmall = await runAlphaWorker({ strokeBuffer, imgBuffer, W: pW, H: pH });
+        if (useGenerativeAI) {
+          try {
+            const sam2Pts = extractSAM2Points(sd, pW, pH, tw, th);
+            if (sam2Pts) {
+              addLog(`   🎯 SAM2 segmentando Layer ${i + 1}…`, 'ai');
+              const { maskBase64 } = await withRetry(
+                () => callReplicate({ type: 'segment', imageBase64: origB64, ...sam2Pts }),
+                retryOpts(addLog, `SAM2 L${i + 1}`),
+              );
+              alphaSmall = await sam2MaskToAlpha(maskBase64, tw, th);
+              alphaW = tw; alphaH = th;
+              addLog(`   ✅ SAM2 concluído`, 'success');
+            }
+          } catch (e) {
+            addLog(`   ⚠️ SAM2 falhou, usando método local: ${e.message}`, 'warn');
+          }
+        }
 
-        // Convert Float32 alpha → RGBA canvas at thumbnail scale
-        const aCanvas = createCanvas(pW, pH);
+        if (!alphaSmall) {
+          // Fallback: local edge-aware selection in Web Worker
+          const smallImg = createCanvas(pW, pH);
+          smallImg.getContext('2d').drawImage(imgEl.current, 0, 0, pW, pH);
+          const imgSd = smallImg.getContext('2d').getImageData(0, 0, pW, pH);
+          const strokeBuffer = sd.data.buffer.slice(0);
+          const imgBuffer    = imgSd.data.buffer.slice(0);
+          alphaSmall = await runAlphaWorker({ strokeBuffer, imgBuffer, W: pW, H: pH });
+        }
+
+        // Convert Float32 alpha → RGBA canvas (GPU-upscaled to W×H later)
+        const aCanvas = createCanvas(alphaW, alphaH);
         const aCtx    = aCanvas.getContext('2d');
-        const aImg    = new ImageData(pW, pH);
+        const aImg    = new ImageData(alphaW, alphaH);
         for (let j = 0; j < alphaSmall.length; j++) {
-          // Boost: alpha values are 0–1 from propagation; compress to 0–255
           const v = Math.min(255, Math.round(Math.pow(alphaSmall[j], 0.6) * 255));
           aImg.data[j * 4]     = 255;
           aImg.data[j * 4 + 1] = 255;
@@ -158,12 +212,12 @@ Respond ONLY with valid JSON:
 
       setProgress(46);
 
-      // ── Step 3: Inpainting (Stability AI) ──────────────────────────────────
+      // ── Step 3: Inpainting (Replicate SDXL) ────────────────────────────────
       const results = [];
 
       if (useGenerativeAI) {
         if (projectId) await updateProjectStatus(projectId, 'inpainting');
-        addLog('🎨 Stability AI preenchendo fundo…', 'ai');
+        addLog('🎨 Replicate SDXL preenchendo fundo…', 'ai');
 
         const { canvas: stableCanvas } = resizeToStability(imgEl.current);
         const stableW = stableCanvas.width, stableH = stableCanvas.height;
@@ -186,7 +240,7 @@ Respond ONLY with valid JSON:
             continue;
           }
 
-          addLog(`🖌️ Stability AI: Layer ${i + 1}…`, 'ai');
+          addLog(`🖌️ Replicate SDXL: Layer ${i + 1}…`, 'ai');
 
           // Build inpaint mask at stability resolution
           const mResized = buildInpaintMask(maskRefs, i, stableW, stableH);
@@ -217,7 +271,8 @@ Respond ONLY with valid JSON:
             ].join(', ');
 
             try {
-              inpaintedDataURL = await withRetry(() => callStability({
+              const { imageBase64: resultB64 } = await withRetry(() => callReplicate({
+                type: 'inpaint',
                 imageBase64: stableB64,
                 maskBase64: canvasToPng(mResized),
                 prompt,
@@ -225,6 +280,7 @@ Respond ONLY with valid JSON:
                 strength: 0.60,
                 steps: 30,
               }), retryOpts(addLog, `Inpainting L${i + 1}`));
+              inpaintedDataURL = `data:image/png;base64,${resultB64}`;
               addLog(`   ✅ Layer ${i + 1} preenchida`, 'success');
             } catch (e) { addLog(`   ⚠️ ${e.message}`, 'warn'); }
           } else { addLog(`   Layer ${i + 1}: sem área para preencher`, 'info'); }
