@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { resizeToReplicate, buildInpaintMask, canvasToPng, createCanvas } from '../lib/canvas';
+import { resizeToReplicate, buildInpaintMask, canvasToPng, canvasToJpeg, createCanvas } from '../lib/canvas';
 import { createProject, updateProjectStatus, saveProjectLayers } from '../lib/supabase';
 import { getSessionId } from '../lib/session';
 import { withRetry } from '../lib/retry';
@@ -34,7 +34,6 @@ function retryOpts(addLog, label) {
   };
 }
 
-// Edge-aware selection in a Web Worker — main thread stays free.
 function runAlphaWorker({ strokeBuffer, imgBuffer, W, H }) {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL('../workers/alpha.worker.js', import.meta.url));
@@ -46,16 +45,16 @@ function runAlphaWorker({ strokeBuffer, imgBuffer, W, H }) {
   });
 }
 
-// Sample representative foreground points from a painted mask canvas.
-// Returns { coords: [[x,y],...], labels: [1,...] } in the scaled (AI image) coordinate space.
-function extractSamplePoints(maskCanvas, W, H, aiW, aiH, maxPts = 8) {
+// Sample representative foreground points from the painted mask.
+// Divides bounding area into a 4×4 grid and takes the centroid of each occupied cell.
+// Returns coords scaled to the SAM2 image dimensions.
+function extractSamplePoints(maskCanvas, W, H, sam2W, sam2H, maxPts = 8) {
   const ctx  = maskCanvas.getContext('2d', { willReadFrequently: true });
   const data = ctx.getImageData(0, 0, W, H).data;
-  const sx = aiW / W, sy = aiH / H;
-  const GRID = 4; // 4×4 = 16 cells, keep the maxPts densest ones
+  const sx = sam2W / W, sy = sam2H / H;
+  const GRID = 4;
   const cells = Array.from({ length: GRID * GRID }, () => ({ sumX: 0, sumY: 0, count: 0 }));
-  // Sample every ~step pixels to stay fast on large images
-  const step = Math.max(1, Math.floor(Math.max(W, H) / 300));
+  const step  = Math.max(1, Math.floor(Math.max(W, H) / 300));
 
   for (let y = 0; y < H; y += step) {
     for (let x = 0; x < W; x += step) {
@@ -75,8 +74,8 @@ function extractSamplePoints(maskCanvas, W, H, aiW, aiH, maxPts = 8) {
   return coords.length ? { coords, labels: coords.map(() => 1) } : null;
 }
 
-// Convert a SAM2 output image (white foreground on black background) into an
-// alpha-channel canvas that works with destination-in compositing.
+// Convert a SAM2 mask image (white foreground / black background) into an
+// alpha-channel canvas usable with destination-in compositing.
 function sam2MaskToAlpha(maskImg, W, H) {
   const c   = createCanvas(W, H);
   const ctx = c.getContext('2d', { willReadFrequently: true });
@@ -95,7 +94,8 @@ export function usePipeline() {
   const [logs,     setLogs]     = useState([]);
   const [progress, setProgress] = useState(0);
   const [phase,    setPhase]    = useState('idle');
-  const addLog = useCallback((msg, type = 'info') => setLogs(p => [...p, { msg, type, id: Date.now() + Math.random() }]), []);
+  const addLog = useCallback((msg, type = 'info') =>
+    setLogs(p => [...p, { msg, type, id: Date.now() + Math.random() }]), []);
 
   const run = useCallback(async ({ imgEl, maskRefs, numLayers, imgFile, useGenerativeAI = true }) => {
     setPhase('running'); setLogs([]); setProgress(0);
@@ -107,24 +107,32 @@ export function usePipeline() {
       projectId = project.id;
     } catch { addLog('⚠️ Supabase offline — continuando sem salvar', 'warn'); }
 
-    // Shared AI-resolution image (max 1024px, multiple of 64) reused for SAM2 + inpainting
+    // ── Prepare two resized image variants ────────────────────────────────────
+    // SAM2: 512px JPEG (small payload, stays well under 1MB body limit)
+    const sam2Scale = Math.min(1, 512 / Math.max(W, H));
+    const sam2W = Math.round(W * sam2Scale), sam2H = Math.round(H * sam2Scale);
+    const sam2Canvas = createCanvas(sam2W, sam2H);
+    sam2Canvas.getContext('2d', { willReadFrequently: true }).drawImage(imgEl.current, 0, 0, sam2W, sam2H);
+    const sam2B64 = canvasToJpeg(sam2Canvas, 0.9);
+
+    // Inpainting: 1024px PNG (Flux Fill Pro quality)
     const { canvas: aiCanvas, w: aiW, h: aiH } = resizeToReplicate(imgEl.current);
     const aiB64 = canvasToPng(aiCanvas);
 
-    // Processing resolution for fallback alpha worker (capped at 640px)
+    // Fallback alpha worker: 640px for speed
     const procScale = Math.min(1, 640 / Math.max(W, H));
     const pW = Math.round(W * procScale), pH = Math.round(H * procScale);
 
     try {
-      // ── Step 1: Per-layer segmentation — SAM2 with alpha-worker fallback ──────
+      // ── Step 1: Per-layer segmentation — SAM2 first, alpha-worker fallback ──
       addLog('🎯 SAM2: segmentando layers…', 'ai');
-      const cutouts       = [];
+      const cutouts        = [];
       const effectiveMasks = []; // alpha canvas (SAM2) or stroke canvas (fallback) per layer
 
       for (let i = 0; i < numLayers; i++) {
         addLog(`🎯 SAM2: Layer ${i + 1}…`, 'ai');
 
-        // Check for paint on this layer
+        // Check for paint
         const smallMask = createCanvas(pW, pH);
         smallMask.getContext('2d', { willReadFrequently: true }).drawImage(maskRefs[i], 0, 0, pW, pH);
         const sd = smallMask.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, pW, pH);
@@ -137,21 +145,20 @@ export function usePipeline() {
 
         // ── Try SAM2 ──────────────────────────────────────────────────────────
         let usedSAM2 = false;
-        const pts = extractSamplePoints(maskRefs[i], W, H, aiW, aiH);
+        const pts = extractSamplePoints(maskRefs[i], W, H, sam2W, sam2H);
         if (pts) {
           try {
             const { maskBase64 } = await withRetry(
-              () => callReplicate({ type: 'sam2', imageBase64: aiB64, pointCoords: pts.coords, pointLabels: pts.labels }),
+              () => callReplicate({ type: 'sam2', imageBase64: sam2B64, pointCoords: pts.coords, pointLabels: pts.labels }),
               retryOpts(addLog, `SAM2 L${i + 1}`),
             );
             const maskImg = await new Promise((resolve, reject) => {
               const img = new Image();
               img.onload  = () => resolve(img);
-              img.onerror = () => reject(new Error('SAM2 mask load failed'));
+              img.onerror = () => reject(new Error('SAM2 mask image load failed'));
               img.src = `data:image/png;base64,${maskBase64}`;
             });
-            // Convert SAM2 mask to alpha canvas at full resolution for cutout
-            const alphaCanvas = sam2MaskToAlpha(maskImg, W, H);
+            const alphaCanvas  = sam2MaskToAlpha(maskImg, W, H);
             const cutoutCanvas = createCanvas(W, H);
             const cCtx = cutoutCanvas.getContext('2d', { willReadFrequently: true });
             cCtx.drawImage(imgEl.current, 0, 0);
@@ -163,7 +170,8 @@ export function usePipeline() {
             usedSAM2 = true;
             addLog(`   ✅ Layer ${i + 1} segmentada pelo SAM2`, 'success');
           } catch (e) {
-            addLog(`   ⚠️ SAM2 falhou: ${e.message} — usando recorte por canvas`, 'warn');
+            addLog(`   ⚠️ SAM2: ${e.message}`, 'warn');
+            addLog(`   ↩ Usando recorte por canvas…`, 'info');
           }
         }
 
@@ -182,9 +190,7 @@ export function usePipeline() {
           const aImg    = new ImageData(pW, pH);
           for (let j = 0; j < alphaSmall.length; j++) {
             const v = Math.min(255, Math.round(Math.pow(alphaSmall[j], 0.6) * 255));
-            aImg.data[j * 4]     = 255;
-            aImg.data[j * 4 + 1] = 255;
-            aImg.data[j * 4 + 2] = 255;
+            aImg.data[j * 4] = aImg.data[j * 4 + 1] = aImg.data[j * 4 + 2] = 255;
             aImg.data[j * 4 + 3] = v;
           }
           aCtx.putImageData(aImg, 0, 0);
@@ -195,7 +201,7 @@ export function usePipeline() {
           cCtx.drawImage(aCanvas, 0, 0, W, H);
           cCtx.globalCompositeOperation = 'source-over';
           cutouts.push({ index: i, cutoutCanvas });
-          effectiveMasks.push(maskRefs[i]); // use stroke canvas for inpainting mask
+          effectiveMasks.push(maskRefs[i]);
           addLog(`   ✅ Layer ${i + 1} recortada`, 'success');
         }
 
@@ -205,7 +211,7 @@ export function usePipeline() {
 
       setProgress(46);
 
-      // ── Step 2: Flux Fill Pro Inpainting ──────────────────────────────────────
+      // ── Step 2: Flux Fill Pro inpainting ──────────────────────────────────────
       const results = [];
 
       if (useGenerativeAI) {
@@ -216,7 +222,6 @@ export function usePipeline() {
           const co = cutouts[i];
           if (!co) { results.push(null); continue; }
 
-          // Layer 1 (frontmost) — nothing in front to fill
           if (i === 0) {
             addLog(`   ℹ️ Layer 1 é frontal — sem inpainting`, 'info');
             results.push({
@@ -230,7 +235,6 @@ export function usePipeline() {
 
           addLog(`🖌️ Flux Fill Pro: Layer ${i + 1}…`, 'ai');
 
-          // Build inpainting mask from effective masks of all layers in front (0..i-1)
           const mResized = buildInpaintMask(effectiveMasks, i, aiW, aiH);
           const md = mResized.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, aiW, aiH);
           let hasArea = false;
@@ -253,8 +257,10 @@ export function usePipeline() {
               );
               inpaintedDataURL = `data:image/png;base64,${resultB64}`;
               addLog(`   ✅ Layer ${i + 1} preenchida`, 'success');
-            } catch (e) { addLog(`   ⚠️ ${e.message}`, 'warn'); }
-          } else { addLog(`   Layer ${i + 1}: sem área para preencher`, 'info'); }
+            } catch (e) { addLog(`   ⚠️ Inpainting: ${e.message}`, 'warn'); }
+          } else {
+            addLog(`   Layer ${i + 1}: sem área para preencher`, 'info');
+          }
 
           results.push({
             index: i, label: `Layer ${i + 1}`, color: LAYER_COLORS[i].hex, elements: [],

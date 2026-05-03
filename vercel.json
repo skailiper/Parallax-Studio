@@ -3,6 +3,9 @@
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ],
   "functions": {
-    "api/replicate.js": { "maxDuration": 300 }
+    "api/replicate.js": {
+      "maxDuration": 300,
+      "memory": 1024
+    }
   }
 }
