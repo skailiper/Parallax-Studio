@@ -12,32 +12,20 @@ function setCors(req, res) {
   res.setHeader('Vary', 'Origin');
 }
 
-const SAM2_VERSION = 'fe97b453a6455861e3bac769b441ca1f1086110da7466dbb65cf1eecfd60dc83';
-
-// Unified prediction runner.
-// version   → POST /v1/predictions         { version, input }
-// modelPath → POST /v1/models/{path}/predictions  { input }
-async function replicateRun({ version, modelPath, input }) {
+// POST to /v1/models/{owner}/{name}/predictions, then poll until succeeded.
+async function replicateRun(modelPath, input) {
   const key = process.env.REPLICATE_KEY;
-  const url  = version
-    ? 'https://api.replicate.com/v1/predictions'
-    : `https://api.replicate.com/v1/models/${modelPath}/predictions`;
-  const requestBody = version ? { version, input } : { input };
+  const url  = `https://api.replicate.com/v1/models/${modelPath}/predictions`;
 
-  console.log('[replicate] endpoint:', url);
+  console.log('[replicate] POST', modelPath);
   console.log('[replicate] input keys:', Object.keys(input));
 
   let pred;
   for (let attempt = 0; attempt < 4; attempt++) {
-    console.log(`[replicate] POST attempt ${attempt + 1}`);
-
     const res = await fetch(url, {
       method: 'POST',
-      headers: {
-        Authorization: `Token ${key}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(requestBody),
+      headers: { Authorization: `Token ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input }),
     });
 
     const rawText = await res.text();
@@ -52,20 +40,17 @@ async function replicateRun({ version, modelPath, input }) {
     }
 
     if (!res.ok) {
-      // Extract the most useful error detail from Replicate's response
       let detail = rawText;
-      try {
-        const parsed = JSON.parse(rawText);
-        detail = parsed.detail || parsed.error || rawText;
-      } catch {}
+      try { const p = JSON.parse(rawText); detail = p.detail || p.error || rawText; } catch {}
       throw new Error(`Replicate ${res.status}: ${detail}`);
     }
 
     pred = JSON.parse(rawText);
-    console.log('[replicate] created id:', pred.id, 'status:', pred.status);
+    console.log('[replicate] id:', pred.id, 'status:', pred.status);
     break;
   }
 
+  // Poll until succeeded / failed / timeout
   const deadline = Date.now() + 270_000;
   let polls = 0;
   while ((pred.status === 'starting' || pred.status === 'processing') && Date.now() < deadline) {
@@ -88,7 +73,7 @@ async function replicateRun({ version, modelPath, input }) {
 }
 
 async function urlToBase64(url) {
-  console.log('[replicate] fetching output URL:', url?.slice(0, 100));
+  console.log('[replicate] fetching output:', url?.slice(0, 100));
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Output fetch failed: ${res.status}`);
   return Buffer.from(await res.arrayBuffer()).toString('base64');
@@ -99,44 +84,13 @@ module.exports = async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  console.log('[replicate] type:', req.body?.type, '| key set:', !!process.env.REPLICATE_KEY);
-
   if (!process.env.REPLICATE_KEY)
     return res.status(500).json({ error: 'REPLICATE_KEY not configured' });
 
   const { type } = req.body || {};
+  console.log('[replicate] type:', type);
 
   try {
-    // ── SAM2 Segmentation ──────────────────────────────────────────────────────
-    // Image arrives as JPEG base64 (≤512px), points as [[x,y],...] arrays
-    if (type === 'sam2') {
-      const { imageBase64, pointCoords, pointLabels } = req.body;
-      if (!imageBase64 || !Array.isArray(pointCoords) || !pointCoords.length)
-        return res.status(400).json({ error: 'imageBase64 and pointCoords required' });
-
-      console.log('[replicate] sam2: image len =', imageBase64.length, '| points =', JSON.stringify(pointCoords));
-
-      // meta/sam-2 expects input_points and input_labels as JSON *strings*,
-      // with float coordinates: [[[x1.0, y1.0], [x2.0, y2.0]]]  (triple-nested for batch)
-      const inputPoints  = JSON.stringify([pointCoords.map(([x, y]) => [+x, +y])]);
-      const inputLabels  = JSON.stringify([pointLabels.map(Number)]);
-
-      const output = await replicateRun({
-        version: SAM2_VERSION,
-        input: {
-          image:            `data:image/jpeg;base64,${imageBase64}`,
-          input_points:     inputPoints,
-          input_labels:     inputLabels,
-          multimask_output: false,
-        },
-      });
-
-      // output may be an array of mask URLs or a single URL
-      const maskUrl = Array.isArray(output) ? output.find(u => typeof u === 'string') ?? output[0] : output;
-      if (!maskUrl || typeof maskUrl !== 'string') throw new Error(`SAM2 output unexpected: ${JSON.stringify(output)}`);
-      return res.status(200).json({ maskBase64: await urlToBase64(maskUrl) });
-    }
-
     // ── Flux Fill Pro Inpainting ───────────────────────────────────────────────
     if (type === 'inpaint') {
       const { imageBase64, maskBase64: maskB64, prompt } = req.body;
@@ -145,15 +99,12 @@ module.exports = async function handler(req, res) {
 
       console.log('[replicate] inpaint: image len =', imageBase64.length, '| mask len =', maskB64.length);
 
-      const output = await replicateRun({
-        modelPath: 'black-forest-labs/flux-fill-pro',
-        input: {
-          image:    `data:image/png;base64,${imageBase64}`,
-          mask:     `data:image/png;base64,${maskB64}`,
-          prompt:   prompt || 'seamless natural background, photorealistic, highly detailed',
-          steps:    28,
-          guidance: 30,
-        },
+      const output = await replicateRun('black-forest-labs/flux-fill-pro', {
+        image:    `data:image/png;base64,${imageBase64}`,
+        mask:     `data:image/png;base64,${maskB64}`,
+        prompt:   prompt || 'seamless natural background, photorealistic, highly detailed',
+        steps:    28,
+        guidance: 30,
       });
 
       const imgUrl = Array.isArray(output) ? output[0] : output;

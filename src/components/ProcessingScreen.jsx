@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import styles from './ProcessingScreen.module.css';
 
 const STAGES = [
-  { label: 'SAM2: segmentação das layers',   min: 0,  max: 46  },
+  { label: 'Segmentação das layers',          min: 0,  max: 46  },
   { label: 'Flux Fill Pro: preenchimento',  min: 46, max: 94  },
   { label: 'Finalização',                  min: 94, max: 100 },
 ];
