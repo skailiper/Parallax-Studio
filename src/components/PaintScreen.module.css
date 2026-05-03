@@ -35,11 +35,11 @@
 
 .iconBtn { background: none; border: none; cursor: pointer; padding: 2px; color: #3a3a52; font-size: 12px; }
 
-.toolRow { display: flex; gap: 6px; }
+.toolRow { display: flex; gap: 5px; }
 
 .toolBtn {
   flex: 1;
-  padding: 9px 4px;
+  padding: 8px 2px;
   background: none;
   border: 1px solid #1e1e2c;
   border-radius: 9px;

@@ -9,6 +9,7 @@ export function PaintScreen({
   zoom, setZoom, canvasRef,
   onDown, onMove, onUp, clearLayer, onProcess,
   useGenerativeAI, setUseGenerativeAI,
+  selecting,
 }) {
   const col       = LAYER_COLORS[activeLayer];
   const sz        = brushSize;
@@ -16,10 +17,16 @@ export function PaintScreen({
   const panRef    = useRef(null);
 
   // ── Cursor SVG ────────────────────────────────────────────────────────────
-  const cursorSVG = tool === 'brush'
-    ? `<svg xmlns='http://www.w3.org/2000/svg' width='${sz*2}' height='${sz*2}'><circle cx='${sz}' cy='${sz}' r='${sz-1}' fill='${encodeURIComponent(col.hex)}' fill-opacity='.28' stroke='white' stroke-width='1.5'/></svg>`
-    : `<svg xmlns='http://www.w3.org/2000/svg' width='${sz*3}' height='${sz*3}'><circle cx='${sz*1.5}' cy='${sz*1.5}' r='${sz*1.5-1}' fill='none' stroke='%23ff5f57' stroke-width='1.5' stroke-dasharray='4,3'/></svg>`;
-  const cursor = `url("data:image/svg+xml,${cursorSVG}") ${tool === 'brush' ? sz : sz*1.5} ${tool === 'brush' ? sz : sz*1.5}, crosshair`;
+  let cursor;
+  if (tool === 'selector') {
+    cursor = selecting ? 'wait' : 'crosshair';
+  } else if (tool === 'brush') {
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${sz*2}' height='${sz*2}'><circle cx='${sz}' cy='${sz}' r='${sz-1}' fill='${encodeURIComponent(col.hex)}' fill-opacity='.28' stroke='white' stroke-width='1.5'/></svg>`;
+    cursor = `url("data:image/svg+xml,${svg}") ${sz} ${sz}, crosshair`;
+  } else {
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${sz*3}' height='${sz*3}'><circle cx='${sz*1.5}' cy='${sz*1.5}' r='${sz*1.5-1}' fill='none' stroke='%23ff5f57' stroke-width='1.5' stroke-dasharray='4,3'/></svg>`;
+    cursor = `url("data:image/svg+xml,${svg}") ${sz*1.5} ${sz*1.5}, crosshair`;
+  }
 
   // ── Scroll-wheel → pan (non-passive so preventDefault works) ─────────────
   useEffect(() => {
@@ -98,16 +105,17 @@ export function PaintScreen({
           <div className={styles.section}>
             <div className={styles.sLabel}>FERRAMENTA</div>
             <div className={styles.toolRow}>
-              {[['brush','✦','Pincel'],['eraser','◻','Borracha']].map(([id,ico,lbl]) => (
+              {[['selector','◎','Seletor'],['brush','✦','Pincel'],['eraser','◻','Borracha']].map(([id,ico,lbl]) => (
                 <button key={id} className={`${styles.toolBtn} ${tool===id ? styles.toolBtnOn : ''}`} onClick={() => setTool(id)}>
                   <span className={styles.toolIco}>{ico}</span>
                   <span className={styles.toolLbl}>{lbl}</span>
                 </button>
               ))}
             </div>
-            <div className={styles.shortcutHint}>
-              <span>🖱 Esq: pintar · Dir: apagar · Scroll: mover</span>
-            </div>
+            {tool === 'selector'
+              ? <div className={styles.shortcutHint}><span>{selecting ? '⏳ Selecionando…' : '🖱 Esq: selecionar · Dir: apagar'}</span></div>
+              : <div className={styles.shortcutHint}><span>🖱 Esq: pintar · Dir: apagar · Scroll: mover</span></div>
+            }
           </div>
 
           <div className={styles.section}>

@@ -14,7 +14,7 @@ export default function App() {
   const [imgFile,      setImgFile]      = useState(null);
   const [numLayers,    setNumLayers]    = useState(3);
   const [activeLayer,  setActiveLayer]  = useState(0);
-  const [tool,         setTool]         = useState('brush');
+  const [tool,         setTool]         = useState('selector');
   const [brushSize,    setBrushSize]    = useState(36);
   const [layerVis,     setLayerVis]     = useState(Array(8).fill(true));
   const [showOrig,     setShowOrig]     = useState(false);
@@ -50,7 +50,7 @@ export default function App() {
   return (
     <div className={styles.root}>
       {screen === 'upload'     && <UploadScreen numLayers={numLayers} setNumLayers={setNumLayers} onFile={handleFile} />}
-      {screen === 'paint'      && <PaintScreen imgFile={imgFile} imgEl={painter.imgEl} numLayers={numLayers} activeLayer={activeLayer} setActiveLayer={setActiveLayer} tool={tool} setTool={setTool} brushSize={brushSize} setBrushSize={setBrushSize} layerVis={layerVis} setLayerVis={setLayerVis} showOrig={showOrig} setShowOrig={setShowOrig} zoom={zoom} setZoom={setZoom} canvasRef={painter.canvasRef} onDown={painter.onDown} onMove={painter.onMove} onUp={painter.onUp} clearLayer={painter.clearLayer} onProcess={handleProcess} useGenerativeAI={useGenerativeAI} setUseGenerativeAI={setUseGenerativeAI} />}
+      {screen === 'paint'      && <PaintScreen imgFile={imgFile} imgEl={painter.imgEl} numLayers={numLayers} activeLayer={activeLayer} setActiveLayer={setActiveLayer} tool={tool} setTool={setTool} brushSize={brushSize} setBrushSize={setBrushSize} layerVis={layerVis} setLayerVis={setLayerVis} showOrig={showOrig} setShowOrig={setShowOrig} zoom={zoom} setZoom={setZoom} canvasRef={painter.canvasRef} onDown={painter.onDown} onMove={painter.onMove} onUp={painter.onUp} clearLayer={painter.clearLayer} onProcess={handleProcess} useGenerativeAI={useGenerativeAI} setUseGenerativeAI={setUseGenerativeAI} selecting={painter.selecting} />}
       {screen === 'processing' && <ProcessingScreen logs={logs} progress={progress} />}
       {screen === 'export'     && <ExportScreen layers={exportLayers} onEdit={handleEdit} onNew={handleNew} />}
     </div>
