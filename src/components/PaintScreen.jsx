@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useMemo } from 'react';
 import { LAYER_COLORS } from '../hooks/usePipeline';
 import styles from './PaintScreen.module.css';
 
@@ -7,7 +7,7 @@ export function PaintScreen({
   tool, setTool, brushSize, setBrushSize,
   layerVis, setLayerVis, showOrig, setShowOrig,
   zoom, setZoom, canvasRef,
-  onDown, onMove, onUp, clearLayer, onProcess,
+  onDown, onMove, onUp, onEnter, clearLayer, onProcess,
   useGenerativeAI, setUseGenerativeAI,
   selecting,
 }) {
@@ -16,17 +16,16 @@ export function PaintScreen({
   const scrollRef = useRef(null);
   const panRef    = useRef(null);
 
-  // ── Cursor SVG ────────────────────────────────────────────────────────────
-  let cursor;
-  if (tool === 'selector') {
-    cursor = selecting ? 'wait' : 'crosshair';
-  } else if (tool === 'brush') {
-    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${sz*2}' height='${sz*2}'><circle cx='${sz}' cy='${sz}' r='${sz-1}' fill='${encodeURIComponent(col.hex)}' fill-opacity='.28' stroke='white' stroke-width='1.5'/></svg>`;
-    cursor = `url("data:image/svg+xml,${svg}") ${sz} ${sz}, crosshair`;
-  } else {
+  // ── Cursor SVG (memoized so it only rebuilds when inputs change) ──────────
+  const cursor = useMemo(() => {
+    if (tool === 'selector') return selecting ? 'wait' : 'crosshair';
+    if (tool === 'brush') {
+      const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${sz*2}' height='${sz*2}'><circle cx='${sz}' cy='${sz}' r='${sz-1}' fill='${encodeURIComponent(col.hex)}' fill-opacity='.28' stroke='white' stroke-width='1.5'/></svg>`;
+      return `url("data:image/svg+xml,${svg}") ${sz} ${sz}, crosshair`;
+    }
     const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${sz*3}' height='${sz*3}'><circle cx='${sz*1.5}' cy='${sz*1.5}' r='${sz*1.5-1}' fill='none' stroke='%23ff5f57' stroke-width='1.5' stroke-dasharray='4,3'/></svg>`;
-    cursor = `url("data:image/svg+xml,${svg}") ${sz*1.5} ${sz*1.5}, crosshair`;
-  }
+    return `url("data:image/svg+xml,${svg}") ${sz*1.5} ${sz*1.5}, crosshair`;
+  }, [tool, sz, col.hex, selecting]);
 
   // ── Scroll-wheel → pan (non-passive so preventDefault works) ─────────────
   useEffect(() => {
@@ -202,7 +201,7 @@ export function PaintScreen({
               onMouseDown={onDown}
               onMouseMove={onMove}
               onMouseUp={onUp}
-              onMouseLeave={onUp}
+              onMouseEnter={onEnter}
               onContextMenu={e => e.preventDefault()}
               onTouchStart={onDown}
               onTouchMove={onMove}

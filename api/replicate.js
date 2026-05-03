@@ -12,28 +12,25 @@ function setCors(req, res) {
   res.setHeader('Vary', 'Origin');
 }
 
-const SDXL_VERSION = '95b7223104132402a9ae91cc677285bc5eb997834bd2349fa486f53910fd68b3';
-
-// POST to /v1/predictions with explicit version hash, then poll until done.
-async function replicateRun(version, input) {
+// POST to /v1/models/{owner}/{name}/predictions, then poll until done.
+async function replicateRun(input) {
   const key = process.env.REPLICATE_KEY;
 
   console.log('[replicate] key present:', !!key, '| prefix:', key?.slice(0, 8));
-  console.log('[replicate] version:', version);
   console.log('[replicate] input keys:', Object.keys(input));
 
   // Create prediction — retry up to 4× on 429
   let pred;
   for (let attempt = 0; attempt < 4; attempt++) {
-    console.log(`[replicate] POST /v1/predictions attempt ${attempt + 1}`);
+    console.log(`[replicate] POST flux-fill-pro attempt ${attempt + 1}`);
 
-    const res = await fetch('https://api.replicate.com/v1/predictions', {
+    const res = await fetch('https://api.replicate.com/v1/models/black-forest-labs/flux-fill-pro/predictions', {
       method: 'POST',
       headers: {
         Authorization: `Token ${key}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ version, input }),
+      body: JSON.stringify({ input }),
     });
 
     const rawText = await res.text();
@@ -99,7 +96,7 @@ module.exports = async function handler(req, res) {
   const { type } = req.body || {};
 
   try {
-    // ── SDXL Inpainting ────────────────────────────────────────────────────────
+    // ── Flux Fill Pro Inpainting ───────────────────────────────────────────────
     if (type === 'inpaint') {
       const { imageBase64, maskBase64: maskB64, prompt } = req.body;
       if (!imageBase64 || !maskB64)
@@ -107,11 +104,12 @@ module.exports = async function handler(req, res) {
 
       console.log('[replicate] inpaint: image len =', imageBase64.length, 'mask len =', maskB64.length);
 
-      const output = await replicateRun(SDXL_VERSION, {
-        image:              `data:image/jpeg;base64,${imageBase64}`,
-        mask:               `data:image/png;base64,${maskB64}`,
-        prompt:             prompt || 'seamless natural background, photorealistic, highly detailed',
-        num_inference_steps: 25,
+      const output = await replicateRun({
+        image:    `data:image/png;base64,${imageBase64}`,
+        mask:     `data:image/png;base64,${maskB64}`,
+        prompt:   prompt || 'seamless natural background, photorealistic, highly detailed',
+        steps:    28,
+        guidance: 30,
       });
 
       const imgUrl = Array.isArray(output) ? output[0] : output;

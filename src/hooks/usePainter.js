@@ -17,6 +17,14 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
   const selectingRef = useRef(false);
   const undoStack    = useRef([]);          // [{ layerIndex, data: ImageData }]
 
+  // Stable refs for window-level handlers (avoid stale closures in useEffect)
+  const toolRef        = useRef(tool);
+  const brushSizeRef   = useRef(brushSize);
+  const activeLayerRef = useRef(activeLayer);
+  useEffect(() => { toolRef.current = tool; },           [tool]);
+  useEffect(() => { brushSizeRef.current = brushSize; }, [brushSize]);
+  useEffect(() => { activeLayerRef.current = activeLayer; }, [activeLayer]);
+
   const [selecting, setSelecting] = useState(false);
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -113,21 +121,61 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
     return tool;
   }
 
+  // paintAt reads brushSize from ref so window-level handlers stay fresh
   function paintAt(x, y, t, layer) {
     const mask = maskRefs.current[layer]; if (!mask) return;
     const ctx  = mask.getContext('2d', { willReadFrequently: true });
+    const bs   = brushSizeRef.current;
     if (t === 'brush') {
       const [r, g, b] = LAYER_COLORS[layer].rgb;
       ctx.globalCompositeOperation = 'source-over';
       ctx.fillStyle = `rgba(${r},${g},${b},0.92)`;
-      ctx.beginPath(); ctx.arc(x, y, brushSize, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, bs, 0, Math.PI * 2); ctx.fill();
     } else {
       ctx.globalCompositeOperation = 'destination-out';
       ctx.fillStyle = 'rgba(0,0,0,1)';
-      ctx.beginPath(); ctx.arc(x, y, brushSize * 1.5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, bs * 1.5, 0, Math.PI * 2); ctx.fill();
       ctx.globalCompositeOperation = 'source-over';
     }
   }
+
+  // ── Window-level mouse handlers (cross-boundary painting) ─────────────────
+  useEffect(() => {
+    function onWindowMove(e) {
+      if (!isPainting.current || toolRef.current === 'selector') return;
+      const canvas = canvasRef.current; if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      // Canvas's own onMouseMove handles events inside — only handle outside here
+      if (e.clientX >= rect.left && e.clientX <= rect.right &&
+          e.clientY >= rect.top  && e.clientY <= rect.bottom) return;
+      const sx = canvas.width / rect.width, sy = canvas.height / rect.height;
+      const pt = { x: (e.clientX - rect.left) * sx, y: (e.clientY - rect.top) * sy };
+      const layer = activeLayerRef.current;
+      if (lastPt.current) {
+        const dx = pt.x - lastPt.current.x, dy = pt.y - lastPt.current.y;
+        const bs = brushSizeRef.current;
+        const steps = Math.max(1, Math.floor(Math.sqrt(dx*dx + dy*dy) / (bs * .22)));
+        const t = activeBtn.current === 2 ? 'eraser' : toolRef.current;
+        for (let i = 1; i <= steps; i++)
+          paintAt(lastPt.current.x + dx*(i/steps), lastPt.current.y + dy*(i/steps), t, layer);
+      }
+      lastPt.current = pt;
+      scheduleRender();
+    }
+
+    function onWindowUp(e) {
+      if (e.button === 1) return;
+      isPainting.current = false;
+      lastPt.current     = null;
+    }
+
+    window.addEventListener('mousemove', onWindowMove);
+    window.addEventListener('mouseup',  onWindowUp);
+    return () => {
+      window.removeEventListener('mousemove', onWindowMove);
+      window.removeEventListener('mouseup',  onWindowUp);
+    };
+  }, [scheduleRender]);
 
   // ── Click-to-select ────────────────────────────────────────────────────────
   async function doClickSelect(posX, posY, eraseMode, layer) {
@@ -230,6 +278,16 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
     lastPt.current     = null;
   }
 
+  // Resume painting when cursor re-enters canvas with button still held
+  function onEnter(e) {
+    if (toolRef.current === 'selector') return;
+    if (e.buttons === 1 || e.buttons === 2) {
+      activeBtn.current  = e.buttons === 2 ? 2 : 0;
+      isPainting.current = true;
+      lastPt.current     = null;
+    }
+  }
+
   function clearLayer(i) {
     saveUndoState(i);
     const m = maskRefs.current[i];
@@ -243,5 +301,5 @@ export function usePainter({ numLayers, activeLayer, tool, brushSize, layerVis, 
     renderComposite();
   }
 
-  return { canvasRef, maskRefs, imgEl, initMasks, renderComposite, onDown, onMove, onUp, clearLayer, clearAll, selecting };
+  return { canvasRef, maskRefs, imgEl, initMasks, renderComposite, onDown, onMove, onUp, onEnter, clearLayer, clearAll, selecting };
 }

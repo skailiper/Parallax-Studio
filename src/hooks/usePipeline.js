@@ -158,7 +158,14 @@ export function usePipeline() {
 
           let inpaintedDataURL = null;
           if (hasArea) {
-            const prompt = 'Seamless photorealistic background. Match existing colors, lighting, and textures exactly. No new objects.';
+            const prompt = [
+              'Seamlessly inpaint the masked region to match the surrounding scene.',
+              'Preserve exactly: photographic or artistic style, lighting direction and quality, dominant color palette,',
+              'atmospheric depth, texture detail, grain, and level of sharpness.',
+              'The filled area must be indistinguishable from the rest of the image.',
+              'No new objects, no color casts, no visible seams, no style changes.',
+              'Ultra-realistic, high detail, perfect edge continuity.',
+            ].join(' ');
             try {
               const { imageBase64: resultB64 } = await withRetry(
                 () => callReplicate({ type: 'inpaint', imageBase64: inpaintB64, maskBase64: canvasToPng(mResized), prompt }),
