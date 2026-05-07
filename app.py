@@ -345,37 +345,48 @@ class ParallaxStudio(ctk.CTk):
         path = filedialog.askopenfilename(
             filetypes=[("Imagens", "*.png *.jpg *.jpeg *.webp *.bmp")])
         if path:
-            self._load_image(path)
+            # Background thread so the dialog closes instantly before heavy PIL work
+            threading.Thread(target=self._load_image_bg, args=(path,), daemon=True).start()
 
     def _on_windnd_drop(self, files):
-        # FIX v3: use 'mbcs' (Windows ANSI) — prevents crash on paths with special chars
+        # Return immediately — WM_DROPFILES must not block or Windows kills the app
         if not files:
             return
-        raw = files[0]
-        if isinstance(raw, bytes):
-            path = raw.decode('mbcs', errors='replace')
-        else:
-            path = str(raw)
-        self.after(0, lambda: self._load_image(path.strip().strip('"')))
+        try:
+            raw  = files[0]
+            path = raw.decode('mbcs', errors='replace') if isinstance(raw, bytes) else str(raw)
+            threading.Thread(target=self._load_image_bg,
+                             args=(path.strip().strip('"'),), daemon=True).start()
+        except Exception:
+            pass
 
-    def _load_image(self, path):
+    def _load_image_bg(self, path):
+        """Open + decode image in a background thread; only touch UI via self.after()."""
         path = path.strip().strip('"').strip("'")
         if not os.path.isfile(path):
             return
-        self.image_path  = path
-        self.orig_image  = Image.open(path).convert("RGBA")
-        W, H             = self.orig_image.size
-        self.masks       = [np.zeros((H, W), dtype=np.uint8) for _ in range(8)]
-        self._base_cache = {}
-        self._auto_masks = None
-        self._depth_map  = None
+        self.after(0, lambda: self._update_status("⏳ Carregando…"))
+        try:
+            image = Image.open(path).convert("RGBA")
+            W, H  = image.size
+            masks = [np.zeros((H, W), dtype=np.uint8) for _ in range(8)]
+        except Exception as e:
+            self.after(0, lambda err=e: self._update_status(f"❌ Erro ao abrir: {err}"))
+            return
 
-        self._drop_hint.place_forget()
-        self.after(80, self._zoom_to_fit)
+        def _apply():
+            self.image_path  = path
+            self.orig_image  = image
+            self.masks       = masks
+            self._base_cache = {}
+            self._auto_masks = None
+            self._depth_map  = None
+            self._drop_hint.place_forget()
+            self._update_status(f"✅ {os.path.basename(path)}\n{W}×{H}px")
+            self._zoom_to_fit()
+            threading.Thread(target=self._preprocess_image, daemon=True).start()
 
-        name = os.path.basename(path)
-        self._update_status(f"✅ {name}\n{W}×{H}px")
-        threading.Thread(target=self._preprocess_image, daemon=True).start()
+        self.after(0, _apply)
 
     # ── Zoom / fit ─────────────────────────────────────────────────────────────
 
