@@ -7,14 +7,22 @@ import numpy as np
 import torch
 import threading
 import os
+import sys
 import json
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+APP_DIR       = os.path.dirname(os.path.abspath(__file__))
 SAM2_CONFIG   = 'configs/sam2.1/sam2.1_hiera_s'
-SAM2_CKPT     = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sam2_hiera_small.pt')
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'settings.json')
+SAM2_CKPT     = os.path.join(APP_DIR, 'sam2_hiera_small.pt')
+SETTINGS_FILE = os.path.join(APP_DIR, 'settings.json')
+
+# Ensure local repos are on Python path
+for _sub in ('ZoeDepth', 'MiDaS'):
+    _p = os.path.join(APP_DIR, _sub)
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
 
 LAYER_COLORS = [
     (255, 61,  90,  "Layer 1"),
@@ -53,13 +61,13 @@ class ParallaxStudio(ctk.CTk):
 
         # ── Core state ─────────────────────────────────────────────────────────
         self.image_path   = None
-        self.orig_image   = None   # PIL RGBA, original resolution
-        self._base_cache  = {}     # zoom → PIL Image (base render cache)
+        self.orig_image   = None
+        self._base_cache  = {}
         self.tk_image     = None
         self.num_layers   = 3
         self.active_layer = 0
         self.brush_size   = 30
-        self.tool         = "brush"   # brush | eraser | magic
+        self.tool         = "brush"
         self.zoom         = 1.0
         self.is_painting  = False
         self.last_x       = None
@@ -67,17 +75,24 @@ class ParallaxStudio(ctk.CTk):
         self.masks        = [None] * 8
         self.output_dir   = None
         self._brush_oval  = None
+        self._thumb_refs  = []
 
-        # ── SAM2 state (lazy) ──────────────────────────────────────────────────
-        self._sam2_model      = None
-        self._sam2_predictor  = None
-        self._sam2_auto_gen   = None
-        self._sam2_device     = None
-        self._auto_masks      = None   # pre-computed on image load
-        self._sam2_lock       = threading.Lock()
+        # ── SAM2 state ─────────────────────────────────────────────────────────
+        self._sam2_model     = None
+        self._sam2_predictor = None
+        self._sam2_auto_gen  = None
+        self._sam2_device    = None
+        self._auto_masks     = None   # pre-computed on image load
+        self._sam2_lock      = threading.Lock()
 
-        # ── Result thumbnails (keep refs so GC doesn't collect) ────────────────
-        self._thumb_refs = []
+        # ── Depth state ────────────────────────────────────────────────────────
+        self._depth_model = None
+        self._depth_map   = None   # float32 HxW, 0=far 1=near (normalized)
+        self._depth_lock  = threading.Lock()
+
+        # ── SDXL Inpainting state ──────────────────────────────────────────────
+        self._sdxl_pipe = None
+        self._sdxl_lock = threading.Lock()
 
         self._load_settings()
         self._build_ui()
@@ -157,7 +172,9 @@ class ParallaxStudio(ctk.CTk):
         self.tool_var = ctk.StringVar(value="brush")
         tf = ctk.CTkFrame(sb, fg_color="transparent")
         tf.grid(row=r, column=0, padx=16, pady=3, sticky="w"); r += 1
-        for val, label in [("brush", "✦ Pincel"), ("eraser", "◻ Borracha"), ("magic", "🪄 Seleção Mágica")]:
+        for val, label in [("brush", "✦ Pincel"),
+                            ("eraser", "◻ Borracha"),
+                            ("magic", "🪄 Seleção Mágica")]:
             ctk.CTkRadioButton(tf, text=label, variable=self.tool_var, value=val,
                                command=lambda v=val: setattr(self, 'tool', v)
                                ).pack(anchor="w", pady=1)
@@ -172,7 +189,7 @@ class ParallaxStudio(ctk.CTk):
         self.brush_label = ctk.CTkLabel(sb, text="30px", font=ctk.CTkFont(size=11))
         self.brush_label.grid(row=r, column=0, padx=16, sticky="w"); r += 1
 
-        # Proc resolution
+        # SAM2 resolution
         ctk.CTkLabel(sb, text="Resolução SAM2:", font=ctk.CTkFont(size=12)).grid(
             row=r, column=0, padx=16, pady=(8, 0), sticky="w"); r += 1
         self.proc_size_var = ctk.StringVar(value="1024")
@@ -180,9 +197,20 @@ class ParallaxStudio(ctk.CTk):
                                variable=self.proc_size_var).grid(
             row=r, column=0, padx=12, pady=3, sticky="ew"); r += 1
 
+        # Inpainting mode (v3)
+        self._sep(sb, r); r += 1
+        ctk.CTkLabel(sb, text="Inpainting (Layer 2+):",
+                     font=ctk.CTkFont(size=12)).grid(
+            row=r, column=0, padx=16, pady=(6, 0), sticky="w"); r += 1
+        self._inpaint_mode = ctk.StringVar(value="OpenCV")
+        ctk.CTkSegmentedButton(sb, values=["SDXL", "OpenCV", "Desligado"],
+                               variable=self._inpaint_mode).grid(
+            row=r, column=0, padx=12, pady=3, sticky="ew"); r += 1
+
         # Zoom
+        self._sep(sb, r); r += 1
         ctk.CTkLabel(sb, text="Zoom:", font=ctk.CTkFont(size=12)).grid(
-            row=r, column=0, padx=16, pady=(8, 0), sticky="w"); r += 1
+            row=r, column=0, padx=16, pady=(6, 0), sticky="w"); r += 1
         zf = ctk.CTkFrame(sb, fg_color="transparent")
         zf.grid(row=r, column=0, padx=12, pady=3, sticky="ew"); r += 1
         ctk.CTkButton(zf, text="−", width=34,
@@ -255,7 +283,6 @@ class ParallaxStudio(ctk.CTk):
         self.canvas.configure(yscrollcommand=self.vscroll.set,
                               xscrollcommand=self.hscroll.set)
 
-        # Drop-zone hint
         self._drop_hint = tk.Label(
             self.canvas,
             text="📁  Arraste uma imagem aqui\nou use o botão Carregar Imagem",
@@ -293,8 +320,8 @@ class ParallaxStudio(ctk.CTk):
             w.destroy()
         self.layer_buttons = []
         for i in range(self.num_layers):
-            r, g, b, name = LAYER_COLORS[i]
-            hex_c = f"#{r:02x}{g:02x}{b:02x}"
+            rv, gv, bv, name = LAYER_COLORS[i]
+            hex_c = f"#{rv:02x}{gv:02x}{bv:02x}"
             btn = ctk.CTkButton(
                 self.layer_frame, text=name,
                 fg_color=hex_c if i == self.active_layer else "transparent",
@@ -321,10 +348,14 @@ class ParallaxStudio(ctk.CTk):
             self._load_image(path)
 
     def _on_windnd_drop(self, files):
+        # FIX v3: use 'mbcs' (Windows ANSI) — prevents crash on paths with special chars
         if not files:
             return
         raw = files[0]
-        path = raw.decode('utf-8', errors='replace') if isinstance(raw, bytes) else str(raw)
+        if isinstance(raw, bytes):
+            path = raw.decode('mbcs', errors='replace')
+        else:
+            path = str(raw)
         self.after(0, lambda: self._load_image(path.strip().strip('"')))
 
     def _load_image(self, path):
@@ -337,6 +368,7 @@ class ParallaxStudio(ctk.CTk):
         self.masks       = [np.zeros((H, W), dtype=np.uint8) for _ in range(8)]
         self._base_cache = {}
         self._auto_masks = None
+        self._depth_map  = None
 
         self._drop_hint.place_forget()
         self.after(80, self._zoom_to_fit)
@@ -374,17 +406,15 @@ class ParallaxStudio(ctk.CTk):
         dw = max(1, int(W * self.zoom))
         dh = max(1, int(H * self.zoom))
 
-        # Cache base image per zoom level — avoid redundant LANCZOS resampling
         z_key = self.zoom
         if z_key not in self._base_cache:
-            interp = Image.BILINEAR if fast else Image.LANCZOS
+            interp   = Image.BILINEAR if fast else Image.LANCZOS
             base_pil = self.orig_image.resize((dw, dh), interp)
             if not fast:
-                self._base_cache = {z_key: base_pil}  # only cache final quality
+                self._base_cache = {z_key: base_pil}
         else:
             base_pil = self._base_cache[z_key]
 
-        # Composit mask overlays via numpy (fast, avoids PIL alpha_composite loop)
         arr = np.array(base_pil.convert("RGB"), dtype=np.float32)
 
         for i in range(self.num_layers):
@@ -393,7 +423,7 @@ class ParallaxStudio(ctk.CTk):
             mr = cv2.resize(self.masks[i], (dw, dh),
                             interpolation=cv2.INTER_NEAREST).astype(np.float32) / 255.0
             rv, gv, bv, _ = LAYER_COLORS[i]
-            alpha = mr * 0.55  # overlay strength
+            alpha = mr * 0.55
             arr[:, :, 0] = arr[:, :, 0] * (1 - alpha) + rv * alpha
             arr[:, :, 1] = arr[:, :, 1] * (1 - alpha) + gv * alpha
             arr[:, :, 2] = arr[:, :, 2] * (1 - alpha) + bv * alpha
@@ -454,7 +484,7 @@ class ParallaxStudio(ctk.CTk):
             return
         x, y = self._canvas_to_orig(e.x, e.y)
         if self.tool == "magic":
-            self._update_status(f"🪄 Seleção mágica…")
+            self._update_status("🪄 Seleção mágica…")
             threading.Thread(target=self._magic_select, args=(x, y),
                              daemon=True).start()
             return
@@ -464,14 +494,14 @@ class ParallaxStudio(ctk.CTk):
         self._render_canvas(fast=True)
 
     def _on_mouse_drag(self, e):
-        self._on_canvas_motion(e)   # keep brush oval updated while dragging
+        self._on_canvas_motion(e)
         if not self.is_painting:
             return
         x, y = self._canvas_to_orig(e.x, e.y)
         if self.last_x is not None:
             dx, dy = x - self.last_x, y - self.last_y
             dist = max(1, int((dx**2 + dy**2) ** 0.5))
-            step = max(1, int(self.brush_size / self.zoom) // 6)  # smooth: 6× denser
+            step = max(1, int(self.brush_size / self.zoom) // 6)
             for i in range(0, dist, step):
                 t = i / dist
                 self._paint_at(int(self.last_x + dx * t), int(self.last_y + dy * t))
@@ -482,7 +512,7 @@ class ParallaxStudio(ctk.CTk):
         if self.is_painting:
             self.is_painting = False
             self.last_x = self.last_y = None
-            self._render_canvas()   # final LANCZOS quality render
+            self._render_canvas()
 
     def _on_canvas_enter(self, e):
         if e.state & 0x100:
@@ -536,7 +566,6 @@ class ParallaxStudio(ctk.CTk):
                 self._sam2_model     = build_sam2(SAM2_CONFIG, SAM2_CKPT, device=device)
                 self._sam2_predictor = SAM2ImagePredictor(self._sam2_model)
                 self._sam2_device    = device
-                self._update_status(f"✅ SAM2 pronto ({device.upper()})")
                 return self._sam2_predictor
             except Exception as e:
                 self._update_status(f"⚠️ SAM2 indisponível:\n{e}")
@@ -561,43 +590,133 @@ class ParallaxStudio(ctk.CTk):
             self._update_status(f"⚠️ AutoMask: {e}")
             return None
 
-    # ── Pre-processing on image load ───────────────────────────────────────────
+    # ── ZoeDepth loading ───────────────────────────────────────────────────────
+
+    def _load_zoedepth(self):
+        with self._depth_lock:
+            if self._depth_model is not None:
+                return self._depth_model
+            try:
+                from zoedepth.models.builder import build_model
+                from zoedepth.utils.config import get_config
+                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                conf   = get_config("zoedepth", "infer")
+                model  = build_model(conf).to(device).eval()
+                self._depth_model = model
+                return model
+            except Exception:
+                return None
+
+    # ── Parallel pre-processing on image load ──────────────────────────────────
 
     def _preprocess_image(self):
-        """Background thread: load SAM2 + run auto segmentation so Análise Automática is instant."""
-        gen = self._load_sam2_auto()
-        if gen is None or self.orig_image is None:
+        """Supervisor: runs SAM2 auto-segmentation + ZoeDepth depth in parallel threads."""
+        if self.orig_image is None:
             return
-        try:
-            self._update_status("⏳ Pré-analisando imagem…")
-            img_rgb  = np.array(self.orig_image.convert("RGB"))
-            H, W     = img_rgb.shape[:2]
-            ps       = int(self.proc_size_var.get())
-            scale    = min(1.0, ps / max(W, H))
-            small    = cv2.resize(img_rgb, (int(W * scale), int(H * scale))) if scale < 1.0 else img_rgb
+        self._update_status("🔬 Analisando…\n(SAM2 + Depth em paralelo)")
 
-            with torch.inference_mode():
-                raw_masks = gen.generate(small)
+        def run_sam2():
+            gen = self._load_sam2_auto()
+            if gen is None or self.orig_image is None:
+                return
+            try:
+                img_rgb = np.array(self.orig_image.convert("RGB"))
+                H, W    = img_rgb.shape[:2]
+                ps      = int(self.proc_size_var.get())
+                scale   = min(1.0, ps / max(W, H))
+                small   = cv2.resize(img_rgb, (int(W * scale), int(H * scale))) \
+                          if scale < 1.0 else img_rgb
+                with torch.inference_mode():
+                    raw = gen.generate(small)
+                full = []
+                for m in raw:
+                    seg = m['segmentation'].astype(np.uint8) * 255
+                    if scale < 1.0:
+                        seg = cv2.resize(seg, (W, H), interpolation=cv2.INTER_NEAREST)
+                    full.append({'segmentation': seg, 'area': int(np.sum(seg > 0))})
+                self._auto_masks = full
+            except Exception:
+                pass
 
-            # Scale segmentations back to full resolution
-            full = []
-            for m in raw_masks:
-                seg = (m['segmentation'].astype(np.uint8)) * 255
-                if scale < 1.0:
-                    seg = cv2.resize(seg, (W, H), interpolation=cv2.INTER_NEAREST)
-                full.append({'segmentation': seg, 'area': int(np.sum(seg > 0))})
+        def run_depth():
+            model = self._load_zoedepth()
+            if model is None or self.orig_image is None:
+                return
+            try:
+                pil = self.orig_image.convert("RGB")
+                with torch.inference_mode():
+                    depth = model.infer_pil(pil)
+                if isinstance(depth, torch.Tensor):
+                    depth = depth.squeeze().cpu().numpy()
+                mn, mx = float(depth.min()), float(depth.max())
+                self._depth_map = ((depth - mn) / max(mx - mn, 1e-6)).astype(np.float32)
+            except Exception:
+                self._depth_map = None
 
-            self._auto_masks = full
-            n = len(full)
-            self._update_status(f"✅ {n} objetos detectados\n→ 'Análise Automática' pronta")
-        except Exception as e:
-            self._update_status(f"⚠️ Pré-análise: {e}")
+        t1 = threading.Thread(target=run_sam2,  daemon=True)
+        t2 = threading.Thread(target=run_depth, daemon=True)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
 
-    # ── Magic select ───────────────────────────────────────────────────────────
+        parts = []
+        if self._auto_masks:
+            parts.append(f"🎯 {len(self._auto_masks)} objetos")
+        if self._depth_map is not None:
+            parts.append("📏 Depth")
+        if parts:
+            self._update_status("✅ " + " | ".join(parts) + "\n→ IA pronta")
+        else:
+            self._update_status("⚠️ Análise parcial\n(SAM2 ou Depth falhou)")
+
+    # ── Depth helpers ──────────────────────────────────────────────────────────
+
+    def _depth_to_layer(self, img_x, img_y):
+        """Map pixel (img_x, img_y) to suggested layer index via depth map."""
+        if self._depth_map is None:
+            return self.active_layer
+        H, W      = self._depth_map.shape
+        y         = min(H - 1, max(0, img_y))
+        x         = min(W - 1, max(0, img_x))
+        depth_val = float(self._depth_map[y, x])   # 1=near/front, 0=far/back
+        bucket    = int((1.0 - depth_val) * self.num_layers)
+        return min(max(bucket, 0), self.num_layers - 1)
+
+    # ── Magic select (smart: pre-computed masks + depth Z-Index) ──────────────
 
     def _magic_select(self, img_x, img_y):
+        # Step 1: use pre-computed SAM2 auto masks (instant, no GPU call needed)
+        if self._auto_masks:
+            best_mask = None
+            best_area = float('inf')
+            for m in self._auto_masks:
+                seg = m['segmentation']
+                if (img_y < seg.shape[0] and img_x < seg.shape[1]
+                        and seg[img_y, img_x] > 127):
+                    area = m['area']
+                    if area < best_area:   # smallest containing = most specific
+                        best_mask = seg
+                        best_area = area
+
+            if best_mask is not None:
+                suggested = self._depth_to_layer(img_x, img_y)
+                if suggested != self.active_layer:
+                    self.active_layer = suggested
+                    self.after(0, self._rebuild_layer_buttons)
+
+                self.masks[self.active_layer] = np.maximum(
+                    self.masks[self.active_layer], best_mask)
+                self.after(0, self._render_canvas)
+                self._update_status(
+                    f"✅ SAM2 pré-computado\n"
+                    f"Layer {self.active_layer + 1} | {best_area:,}px")
+                return
+
+        # Step 2: fallback — run SAM2 predictor live on click point
         predictor = self._load_sam2()
         if predictor is None or self.orig_image is None:
+            self._update_status("⚠️ SAM2 indisponível")
             return
         try:
             ps    = int(self.proc_size_var.get())
@@ -606,7 +725,7 @@ class ParallaxStudio(ctk.CTk):
             img   = np.array(self.orig_image.convert("RGB"))
 
             if scale < 1.0:
-                img_s = cv2.resize(img, (int(W * scale), int(H * scale)))
+                img_s  = cv2.resize(img, (int(W * scale), int(H * scale)))
                 px, py = int(img_x * scale), int(img_y * scale)
             else:
                 img_s, px, py = img, img_x, img_y
@@ -614,13 +733,9 @@ class ParallaxStudio(ctk.CTk):
             predictor.set_image(img_s)
             pts    = np.array([[px, py]], dtype=np.float32)
             labels = np.array([1], dtype=np.int32)
-
             with torch.inference_mode():
                 masks, scores, _ = predictor.predict(
-                    point_coords=pts,
-                    point_labels=labels,
-                    multimask_output=True,
-                )
+                    point_coords=pts, point_labels=labels, multimask_output=True)
 
             best   = int(np.argmax(scores))
             result = (masks[best] > 0.5).astype(np.uint8) * 255
@@ -628,10 +743,16 @@ class ParallaxStudio(ctk.CTk):
                 result = cv2.resize(result, (W, H), interpolation=cv2.INTER_NEAREST)
             result = cv2.GaussianBlur(result, (3, 3), 0)
 
+            suggested = self._depth_to_layer(img_x, img_y)
+            if suggested != self.active_layer:
+                self.active_layer = suggested
+                self.after(0, self._rebuild_layer_buttons)
+
             self.masks[self.active_layer] = np.maximum(
                 self.masks[self.active_layer], result)
             self.after(0, self._render_canvas)
-            self._update_status(f"✅ Mágica: score {scores[best]:.2f}")
+            self._update_status(
+                f"✅ Mágica: score {scores[best]:.2f}\nLayer {self.active_layer + 1}")
         except Exception as e:
             self._update_status(f"❌ Mágica: {e}")
 
@@ -655,12 +776,12 @@ class ParallaxStudio(ctk.CTk):
     def _apply_auto_masks(self):
         if not self._auto_masks or self.orig_image is None:
             return
-        W, H      = self.orig_image.size
-        total_px  = W * H
+        W, H     = self.orig_image.size
+        total_px = W * H
 
         valid = [(m['area'], m['segmentation']) for m in self._auto_masks
                  if 0.003 * total_px < m['area'] < 0.72 * total_px]
-        valid.sort(key=lambda x: x[0], reverse=True)   # largest → front layers
+        valid.sort(key=lambda x: x[0], reverse=True)
 
         n = min(len(valid), self.num_layers)
         for i in range(n):
@@ -715,37 +836,86 @@ class ParallaxStudio(ctk.CTk):
             predictor.set_image(img_s)
             with torch.inference_mode():
                 masks, scores, _ = predictor.predict(
-                    point_coords=points,
-                    point_labels=labels,
-                    multimask_output=True,
-                )
+                    point_coords=points, point_labels=labels, multimask_output=True)
             best = (masks[int(np.argmax(scores))] > 0.5).astype(np.uint8) * 255
             if scale < 1.0:
                 best = cv2.resize(best, (W, H), interpolation=cv2.INTER_NEAREST)
-            # Light morphological cleanup + feather
             best = cv2.morphologyEx(best, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
             return cv2.GaussianBlur(best, (5, 5), 0)
-        except Exception as e:
-            self._update_status(f"⚠️ SAM2 erro: {e}")
+        except Exception:
             return self._canny_refine_mask(mask)
 
     def _canny_refine_mask(self, mask):
-        gray     = cv2.cvtColor(np.array(self.orig_image.convert("RGB")), cv2.COLOR_RGB2GRAY)
-        blurred  = cv2.GaussianBlur(mask, (21, 21), 0)
+        gray      = cv2.cvtColor(np.array(self.orig_image.convert("RGB")), cv2.COLOR_RGB2GRAY)
+        blurred   = cv2.GaussianBlur(mask, (21, 21), 0)
         _, binary = cv2.threshold(blurred, 30, 255, cv2.THRESH_BINARY)
-        edges    = cv2.Canny(gray, 50, 150)
-        edges_in = cv2.bitwise_and(
+        edges     = cv2.Canny(gray, 50, 150)
+        edges_in  = cv2.bitwise_and(
             cv2.dilate(edges,  np.ones((5,  5),  np.uint8), iterations=2),
             cv2.dilate(binary, np.ones((20, 20), np.uint8), iterations=1))
-        combined = cv2.bitwise_or(binary, edges_in)
-        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
-        combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN,  np.ones((3, 3), np.uint8))
+        combined  = cv2.bitwise_or(binary, edges_in)
+        combined  = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+        combined  = cv2.morphologyEx(combined, cv2.MORPH_OPEN,  np.ones((3, 3), np.uint8))
         return cv2.GaussianBlur(combined, (9, 9), 0)
 
     def _apply_mask_to_image(self, mask):
         arr = np.array(self.orig_image.convert("RGBA"))
         arr[:, :, 3] = mask
         return Image.fromarray(arr, "RGBA")
+
+    # ── SDXL Inpainting ───────────────────────────────────────────────────────
+
+    def _load_sdxl(self):
+        with self._sdxl_lock:
+            if self._sdxl_pipe is not None:
+                return self._sdxl_pipe
+            try:
+                from diffusers import StableDiffusionXLInpaintPipeline
+                self._update_status("🔄 Carregando SDXL…\n(primeira vez é lento)")
+                pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
+                    "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
+                    torch_dtype=torch.float16,
+                    variant="fp16",
+                )
+                pipe.enable_model_cpu_offload()
+                self._sdxl_pipe = pipe
+                return pipe
+            except Exception as e:
+                self._update_status(f"⚠️ SDXL falhou: {e}\n→ usando OpenCV")
+                return None
+
+    def _inpaint_background(self, working_pil, mask_np):
+        """Fill mask_np region in working_pil. Returns PIL RGB."""
+        mode = self._inpaint_mode.get()
+
+        if mode == "SDXL":
+            pipe = self._load_sdxl()
+            if pipe is not None:
+                try:
+                    W, H   = working_pil.size
+                    scale  = 1024 / max(W, H)
+                    img_r  = working_pil.resize((int(W * scale), int(H * scale)), Image.LANCZOS)
+                    mask_r = Image.fromarray(mask_np).resize(
+                        (int(W * scale), int(H * scale)), Image.NEAREST)
+                    out = pipe(
+                        prompt="seamless photorealistic background, high quality",
+                        negative_prompt="blurry, distorted, artifacts, watermark",
+                        image=img_r,
+                        mask_image=mask_r,
+                        num_inference_steps=20,
+                        strength=0.99,
+                        guidance_scale=7.5,
+                    ).images[0]
+                    return out.resize((W, H), Image.LANCZOS).convert("RGB")
+                except Exception as e:
+                    self._update_status(f"⚠️ SDXL erro, fallback OpenCV: {e}")
+
+        if mode in ("SDXL", "OpenCV"):
+            img_bgr    = cv2.cvtColor(np.array(working_pil), cv2.COLOR_RGB2BGR)
+            result_bgr = cv2.inpaint(img_bgr, mask_np, 15, cv2.INPAINT_TELEA)
+            return Image.fromarray(cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB))
+
+        return working_pil   # "Desligado"
 
     # ── Results preview ────────────────────────────────────────────────────────
 
@@ -760,7 +930,7 @@ class ParallaxStudio(ctk.CTk):
                 thumb = img.copy()
                 thumb.thumbnail((230, 170), Image.LANCZOS)
 
-                cb  = Image.fromarray(_checkerboard(thumb.width, thumb.height), "RGBA")
+                cb   = Image.fromarray(_checkerboard(thumb.width, thumb.height), "RGBA")
                 flat = Image.alpha_composite(cb, thumb)
 
                 photo = ImageTk.PhotoImage(flat)
@@ -803,6 +973,8 @@ class ParallaxStudio(ctk.CTk):
                 return
 
             results = []
+            working = self.orig_image.convert("RGB")   # inpainting builds on this
+
             for idx, i in enumerate(painted):
                 self._update_status(f"🔍 SAM2: Layer {i+1} ({idx+1}/{len(painted)})…")
                 refined  = self._sam2_refine_mask(self.masks[i])
@@ -812,8 +984,18 @@ class ParallaxStudio(ctk.CTk):
                 results.append(out_path)
                 self._update_status(f"✅ Layer {i+1} salva")
 
+                # Inpaint hole left by this layer so next layer has clean background
+                if self._inpaint_mode.get() != "Desligado" and idx < len(painted) - 1:
+                    self._update_status(f"🎨 Inpainting Layer {i+1}…")
+                    kernel  = np.ones((15, 15), np.uint8)
+                    dilated = cv2.dilate(refined, kernel, iterations=2)
+                    working = self._inpaint_background(working, dilated)
+                    bg_path = os.path.join(out_dir, f"{stem}_bg_layer_{i+1}.png")
+                    working.save(bg_path)
+                    results.append(bg_path)
+
             self._update_status(
-                f"🎉 {len(results)} layer(s) exportadas!\n{self._short_path(out_dir)}")
+                f"🎉 {len(results)} arquivo(s) exportados!\n{self._short_path(out_dir)}")
             self.after(0, lambda: self._show_results(results))
 
         except Exception as ex:
