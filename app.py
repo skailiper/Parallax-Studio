@@ -140,6 +140,9 @@ class ParallaxStudio(ctk.CTk):
         self._sdxl_pipe = None
         self._sdxl_lock = threading.Lock()
 
+        # Preprocessing gate — blocks canvas interaction while AI is running
+        self._preprocessing_active = False
+
         self._load_settings()
         self._build_ui()
         self._setup_dnd()
@@ -336,23 +339,30 @@ class ParallaxStudio(ctk.CTk):
         self.canvas.bind("<Motion>",          self._on_canvas_motion)
         self.canvas.bind("<Leave>",           self._on_canvas_leave)
 
-        # ── Loading overlay (placed on canvas_frame, not canvas) ────────────
+        # ── Loading overlay — full-canvas blocker + centered card ───────────
+        # _ov_bg: covers the entire canvas area, blocks all mouse events
+        self._ov_bg = tk.Frame(self._canvas_frame, bg="#000000")
+        self._ov_bg.bind("<ButtonPress-1>",   lambda e: "break")
+        self._ov_bg.bind("<B1-Motion>",       lambda e: "break")
+        self._ov_bg.bind("<ButtonRelease-1>", lambda e: "break")
+
+        # _ov: the visible info card, centered on top of the blocker
         self._ov = ctk.CTkFrame(self._canvas_frame, corner_radius=18,
                                 fg_color="#0b0b1e", border_width=1,
                                 border_color="#2e2e55")
         self._ov_icon  = ctk.CTkLabel(self._ov, text="🔬",
-                                      font=ctk.CTkFont(size=36))
-        self._ov_icon.pack(pady=(22, 4))
+                                      font=ctk.CTkFont(size=42))
+        self._ov_icon.pack(pady=(26, 4))
         self._ov_title = ctk.CTkLabel(self._ov, text="Analisando…",
-                                      font=ctk.CTkFont(size=15, weight="bold"),
+                                      font=ctk.CTkFont(size=16, weight="bold"),
                                       text_color="#5eead4")
         self._ov_title.pack(pady=(0, 6))
         self._ov_body  = ctk.CTkLabel(self._ov, text="",
                                       font=ctk.CTkFont(size=12),
-                                      text_color="#888", wraplength=380, justify="center")
+                                      text_color="#aaa", wraplength=380, justify="center")
         self._ov_body.pack(pady=(0, 14), padx=30)
         self._ov_bar   = ctk.CTkProgressBar(self._ov, width=340)
-        self._ov_bar.pack(pady=(0, 22), padx=30)
+        self._ov_bar.pack(pady=(0, 26), padx=30)
         self._ov_bar.set(0)
 
     def _build_results_panel(self):
@@ -379,12 +389,21 @@ class ParallaxStudio(ctk.CTk):
             self._ov_title.configure(text=title)
             self._ov_body.configure(text=body)
             self._ov_bar.set(max(0.0, min(1.0, progress)))
+            # Full-coverage semi-transparent blocker
+            self._ov_bg.place(x=0, y=0, relwidth=1, relheight=1)
+            self._ov_bg.lift()
+            # Info card centered on top of blocker
             self._ov.place(relx=0.5, rely=0.5, anchor="center")
             self._ov.lift()
+            self._preprocessing_active = True
         self.after(0, _do)
 
     def _overlay_hide(self):
-        self.after(0, self._ov.place_forget)
+        def _do():
+            self._ov.place_forget()
+            self._ov_bg.place_forget()
+            self._preprocessing_active = False
+        self.after(0, _do)
 
     # ── Layer UI ───────────────────────────────────────────────────────────────
 
@@ -587,7 +606,7 @@ class ParallaxStudio(ctk.CTk):
             cv2.circle(mask, (x, y), int(r * 1.6), 0, -1)
 
     def _on_mouse_down(self, e):
-        if self.orig_image is None:
+        if self.orig_image is None or self._preprocessing_active:
             return
         x, y = self._canvas_to_orig(e.x, e.y)
         if self.tool == "magic":
@@ -685,15 +704,59 @@ class ParallaxStudio(ctk.CTk):
             from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
             self._sam2_auto_gen = SAM2AutomaticMaskGenerator(
                 self._sam2_model,
-                points_per_side=32,
-                pred_iou_thresh=0.82,
-                stability_score_thresh=0.90,
-                min_mask_region_area=500,
+                points_per_side=24,         # fewer points → bigger, whole-object masks
+                pred_iou_thresh=0.78,        # slightly relaxed → keeps full objects
+                stability_score_thresh=0.85,
+                min_mask_region_area=1200,   # drop tiny fragments (skin patches, leaves)
+                box_nms_thresh=0.65,         # merge near-duplicate boxes
+                crop_n_layers=1,             # multi-scale: finds small AND large objects
+                crop_overlap_ratio=0.4,
             )
             return self._sam2_auto_gen
         except Exception as e:
             self._update_status(f"⚠️ AutoMask: {e}")
             return None
+
+    def _merge_object_masks(self, masks):
+        """
+        Absorb small masks that are mostly contained inside a larger mask.
+        This turns over-segmented body-parts / leaf clusters into whole objects.
+        """
+        if len(masks) < 2:
+            return masks
+
+        # Sort largest first so parents come before children
+        masks = sorted(masks, key=lambda m: m['area'], reverse=True)
+        absorbed = [False] * len(masks)
+
+        for i in range(len(masks)):
+            if absorbed[i]:
+                continue
+            parent_seg = masks[i]['segmentation']
+            for j in range(i + 1, len(masks)):
+                if absorbed[j]:
+                    continue
+                child_seg  = masks[j]['segmentation']
+                child_area = masks[j]['area']
+                if child_area == 0:
+                    continue
+                # How much of child is inside parent?
+                overlap = int(np.sum((parent_seg > 0) & (child_seg > 0)))
+                if overlap / child_area > 0.50:          # >50% contained → merge
+                    masks[i]['segmentation'] = np.maximum(parent_seg, child_seg)
+                    masks[i]['area']         = int(np.sum(masks[i]['segmentation'] > 0))
+                    parent_seg               = masks[i]['segmentation']
+                    absorbed[j]              = True
+
+        result = []
+        for i, m in enumerate(masks):
+            if not absorbed[i]:
+                # Recompute centroid after merging
+                ys, xs = np.nonzero(m['segmentation'] > 0)
+                m['cx'] = int(xs.mean()) if len(xs) > 0 else m['cx']
+                m['cy'] = int(ys.mean()) if len(ys) > 0 else m['cy']
+                result.append(m)
+        return result
 
     # ── ZoeDepth ───────────────────────────────────────────────────────────────
 
@@ -748,14 +811,21 @@ class ParallaxStudio(ctk.CTk):
                     if scale < 1.0:
                         seg = cv2.resize(seg, (W, H), interpolation=cv2.INTER_NEAREST)
                     area = int(np.sum(seg > 0))
-                    # Pre-compute centroid for depth lookup
                     ys, xs = np.nonzero(seg > 0)
                     cx = int(xs.mean()) if len(xs) > 0 else W // 2
                     cy = int(ys.mean()) if len(ys) > 0 else H // 2
                     full.append({'segmentation': seg, 'area': area, 'cx': cx, 'cy': cy})
+
+                # ── Merge over-segmented parts into whole objects ──────────
+                # If a smaller mask is >50% contained inside a larger mask,
+                # they are parts of the same object → absorb into the parent.
+                self._overlay_show("🔗", "Unindo partes de objetos…",
+                                   "Combinando segmentos relacionados em objetos inteiros…", 0.35)
+                full = self._merge_object_masks(full)
+
                 self._auto_masks = full
                 self._overlay_show("🎯", "Objetos identificados",
-                                   f"{len(full)} segmentos encontrados pelo SAM2", 0.45)
+                                   f"{len(full)} elementos encontrados na imagem", 0.45)
             except Exception as e:
                 _log('SAM2_AUTO', type(e), e, e.__traceback__)
 
@@ -1024,7 +1094,10 @@ class ParallaxStudio(ctk.CTk):
 
     def _apply_mask_to_image(self, mask):
         """Apply feathered mask as alpha channel on the original image."""
-        feathered = _feather_mask(mask, self._get_feather_radius())
+        # 1. Morphological closing to fill small holes inside the object
+        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+        # 2. Smooth the boundary
+        feathered = _feather_mask(closed, self._get_feather_radius())
         arr = np.array(self.orig_image.convert("RGBA"))
         arr[:, :, 3] = feathered
         return Image.fromarray(arr, "RGBA")
@@ -1093,14 +1166,28 @@ class ParallaxStudio(ctk.CTk):
                 except Exception as e:
                     self._update_status(f"⚠️ SDXL erro → OpenCV: {e}")
 
-        # OpenCV Navier-Stokes — better than TELEA for large regions
-        img_bgr = cv2.cvtColor(np.array(working_pil.convert("RGB")), cv2.COLOR_RGB2BGR)
-
-        # Adaptive radius: larger holes need more propagation
+        # OpenCV multi-scale Navier-Stokes — handles large regions much better
+        img_bgr   = cv2.cvtColor(np.array(working_pil.convert("RGB")), cv2.COLOR_RGB2BGR)
         hole_area = int(np.sum(binary_mask_np > 0))
-        radius    = min(50, max(15, int(np.sqrt(hole_area) * 0.05)))
 
-        result_bgr = cv2.inpaint(img_bgr, binary_mask_np, radius, cv2.INPAINT_NS)
+        if hole_area > 40000:
+            # Large hole: first do a coarse fill at half resolution, then refine at full res
+            H_orig, W_orig = img_bgr.shape[:2]
+            img_half  = cv2.resize(img_bgr,        (W_orig // 2, H_orig // 2))
+            mask_half = cv2.resize(binary_mask_np, (W_orig // 2, H_orig // 2),
+                                   interpolation=cv2.INTER_NEAREST)
+            mask_half = (mask_half > 127).astype(np.uint8) * 255
+            coarse    = cv2.inpaint(img_half, mask_half, 25, cv2.INPAINT_NS)
+            # Upscale coarse fill and use it to pre-fill the hole in the original
+            coarse_up = cv2.resize(coarse, (W_orig, H_orig), interpolation=cv2.INTER_LINEAR)
+            prefilled = img_bgr.copy()
+            prefilled[binary_mask_np > 127] = coarse_up[binary_mask_np > 127]
+            # Final refinement pass at full resolution with smaller radius
+            result_bgr = cv2.inpaint(prefilled, binary_mask_np, 12, cv2.INPAINT_NS)
+        else:
+            radius     = min(40, max(10, int(np.sqrt(hole_area) * 0.04)))
+            result_bgr = cv2.inpaint(img_bgr, binary_mask_np, radius, cv2.INPAINT_NS)
+
         return Image.fromarray(cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB))
 
     def _build_inpaint_prompt(self, img_pil, mask_np):
