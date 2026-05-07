@@ -191,7 +191,9 @@ class ParallaxStudio(ctk.CTk):
         self.tool         = "brush"
         self._brush_oval  = None
         self._thumb_refs  = []
-        self._lasso_pts   = []   # [(canvas_x, canvas_y), ...] while drawing
+        self._lasso_pts    = []   # [(canvas_x, canvas_y), ...] while drawing lasso
+        self._scribble_pts = []   # [(img_x, img_y), ...] accumulated across strokes
+        self._scribble_job = None # after() id for debounced SAM2
 
         # Models
         self._sam2_model     = None
@@ -290,6 +292,7 @@ class ParallaxStudio(ctk.CTk):
         tf.grid(row=r, column=0, padx=16, pady=3, sticky="w"); r += 1
         for val, lbl in [("brush", "Pincel"),
                          ("eraser", "Borracha"),
+                         ("scribble", "Pincel de Objeto"),
                          ("lasso", "Contorno (Lasso)")]:
             ctk.CTkRadioButton(tf, text=lbl, variable=self.tool_var, value=val,
                                command=lambda v=val: setattr(self, 'tool', v)
@@ -586,6 +589,9 @@ class ParallaxStudio(ctk.CTk):
             self._depth_map  = None
             self._show_depth = False
             self._base_cache = {}
+            self._scribble_pts = []
+            self.canvas.delete("scribble")
+            self.canvas.delete("lasso")
             self._drop_hint.place_forget()
             self._update_status(f"{os.path.basename(path)}\n{W}x{H}px")
             self._zoom_to_fit()
@@ -671,6 +677,8 @@ class ParallaxStudio(ctk.CTk):
         self.canvas.delete("img")
         self.canvas.create_image(0, 0, anchor="nw", image=self.tk_image, tags="img")
         self.canvas.configure(scrollregion=(0, 0, dw, dh))
+        self.canvas.tag_raise("lasso")
+        self.canvas.tag_raise("scribble")
         self.canvas.tag_raise("cursor")
 
     # ── Brush cursor ───────────────────────────────────────────────────────────
@@ -683,16 +691,21 @@ class ParallaxStudio(ctk.CTk):
                 self.canvas.delete(self._brush_oval)
                 self._brush_oval = None
             return
-        r       = max(2, int(self.brush_size * self.zoom))
-        outline = "white" if self.tool == "brush" else "#ff6060"
-        dash    = (4, 4)
+        r = max(2, int(self.brush_size * self.zoom))
+        if self.tool == "scribble":
+            outline, dash, width = "#00e5ff", (), 2
+        elif self.tool == "brush":
+            outline, dash, width = "white", (4, 4), 1
+        else:
+            outline, dash, width = "#ff6060", (4, 4), 1
         if self._brush_oval:
             self.canvas.coords(self._brush_oval, cx - r, cy - r, cx + r, cy + r)
-            self.canvas.itemconfigure(self._brush_oval, outline=outline, dash=dash)
+            self.canvas.itemconfigure(self._brush_oval, outline=outline,
+                                      dash=dash, width=width)
         else:
             self._brush_oval = self.canvas.create_oval(
                 cx - r, cy - r, cx + r, cy + r,
-                outline=outline, width=1, dash=dash, tags="cursor")
+                outline=outline, width=width, dash=dash, tags="cursor")
 
     def _on_canvas_leave(self, e):
         if self._brush_oval:
@@ -736,6 +749,19 @@ class ParallaxStudio(ctk.CTk):
                 self._undo[self.active_layer] = (m.copy(), s.copy() if s is not None else None)
             self.is_painting = True
             return
+        if self.tool == "scribble":
+            # First stroke on this layer → save undo
+            if not self._scribble_pts:
+                m = self.masks[self.active_layer]
+                s = self.sam2_masks[self.active_layer]
+                if m is not None:
+                    self._undo[self.active_layer] = (
+                        m.copy(), s.copy() if s is not None else None)
+            x, y = self._canvas_to_img(e.x, e.y)
+            self._scribble_pts.append((x, y))
+            self.is_painting = True
+            self.last_x, self.last_y = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
+            return
         x, y = self._canvas_to_img(e.x, e.y)
         # Undo snapshot
         m = self.masks[self.active_layer]
@@ -761,6 +787,20 @@ class ParallaxStudio(ctk.CTk):
                                         tags="lasso")
             self._lasso_pts.append((cx, cy))
             return
+        if self.tool == "scribble":
+            cx = self.canvas.canvasx(e.x)
+            cy = self.canvas.canvasy(e.y)
+            # Draw stroke on canvas
+            if self.last_x is not None:
+                self.canvas.create_line(self.last_x, self.last_y, cx, cy,
+                                        fill="#00e5ff", width=max(3, int(self.brush_size * self.zoom * 0.6)),
+                                        capstyle=tk.ROUND, joinstyle=tk.ROUND,
+                                        tags="scribble")
+            self.last_x, self.last_y = cx, cy
+            # Collect image-space points
+            ix, iy = self._canvas_to_img(e.x, e.y)
+            self._scribble_pts.append((ix, iy))
+            return
         x, y = self._canvas_to_img(e.x, e.y)
         if self.last_x is not None:
             dx, dy = x - self.last_x, y - self.last_y
@@ -780,7 +820,6 @@ class ParallaxStudio(ctk.CTk):
         if self.tool == "lasso":
             pts = self._lasso_pts
             if len(pts) > 4:
-                # Close the lasso visually
                 fx, fy = pts[0]
                 lx, ly = pts[-1]
                 self.canvas.create_line(lx, ly, fx, fy,
@@ -794,6 +833,10 @@ class ParallaxStudio(ctk.CTk):
             else:
                 self.canvas.delete("lasso")
                 self._lasso_pts = []
+            return
+        if self.tool == "scribble":
+            if len(self._scribble_pts) > 2:
+                self._schedule_scribble_sam2(self.active_layer)
             return
         self._render_canvas()
         # Schedule real-time SAM2 refinement (brush only, not eraser)
@@ -818,6 +861,8 @@ class ParallaxStudio(ctk.CTk):
             self._undo[self.active_layer] = (m.copy(), s.copy() if s is not None else None)
             m[:] = 0
             self.sam2_masks[self.active_layer] = None
+            self._scribble_pts = []
+            self.canvas.delete("scribble")
             self._rebuild_layer_buttons()
             self._render_canvas()
 
@@ -1261,6 +1306,122 @@ class ParallaxStudio(ctk.CTk):
             _log('LASSO_SAM2', type(ex), ex, ex.__traceback__)
             self.after(0, self._clear_lasso_canvas)
             self.after(0, lambda: self._update_status(f"Lasso erro: {ex}"))
+
+    # ── Scribble / Object Paint (Google-Photos-style brush → SAM2) ────────────
+
+    def _clear_scribble_canvas(self):
+        self.canvas.delete("scribble")
+        self._scribble_pts = []
+
+    def _schedule_scribble_sam2(self, layer):
+        """Debounce: wait 500 ms after last stroke before running SAM2."""
+        if self._scribble_job is not None:
+            self.after_cancel(self._scribble_job)
+        self._scribble_job = self.after(
+            500, lambda: self._kick_scribble_sam2(layer))
+
+    def _kick_scribble_sam2(self, layer):
+        self._scribble_job = None
+        if self._sam2_running:
+            # SAM2 busy — retry in 300 ms
+            self._scribble_job = self.after(
+                300, lambda: self._kick_scribble_sam2(layer))
+            return
+        pts = list(self._scribble_pts)
+        if not pts:
+            return
+        self._sam2_running = True
+        self._update_status("Analisando objeto — SAM2...")
+        threading.Thread(target=self._run_scribble_sam2,
+                         args=(pts, layer), daemon=True).start()
+
+    def _run_scribble_sam2(self, img_pts, layer):
+        """Full-quality SAM2 from scribble strokes.
+        img_pts: list of (img_x, img_y) collected during all brush strokes.
+        """
+        try:
+            if self.orig_image is None:
+                return
+            predictor = self._load_predictor()
+            if predictor is None:
+                self._update_status("SAM2 indisponivel")
+                return
+
+            W, H  = self.orig_image.size
+            ps    = int(self.proc_size_var.get())
+            scale = min(1.0, ps / max(W, H))
+            img   = np.array(self.orig_image.convert("RGB"))
+
+            # ── Build prompt from stroke points ────────────────────────────
+            arr = np.array(img_pts, dtype=np.int32)
+            arr[:, 0] = np.clip(arr[:, 0], 0, W - 1)
+            arr[:, 1] = np.clip(arr[:, 1], 0, H - 1)
+
+            # Evenly subsample up to 24 points along the stroke path
+            n_want = min(24, len(arr))
+            idx    = np.round(np.linspace(0, len(arr) - 1, n_want)).astype(int)
+            pts_sel = arr[idx].astype(np.float32)   # (N, 2) x,y
+            labels  = np.ones(len(pts_sel), dtype=np.int32)
+
+            # Bounding box with 8% padding
+            x0, y0 = int(arr[:, 0].min()), int(arr[:, 1].min())
+            x1, y1 = int(arr[:, 0].max()), int(arr[:, 1].max())
+            pad_x = max(12, int((x1 - x0) * 0.08))
+            pad_y = max(12, int((y1 - y0) * 0.08))
+            x0 = max(0,     x0 - pad_x);  y0 = max(0,     y0 - pad_y)
+            x1 = min(W - 1, x1 + pad_x);  y1 = min(H - 1, y1 + pad_y)
+            box = np.array([x0, y0, x1, y1], dtype=np.float32)
+
+            # ── Scale to processing resolution ────────────────────────────
+            if scale < 1.0:
+                img_s   = cv2.resize(img, (int(W * scale), int(H * scale)))
+                pts_s   = pts_sel * scale
+                box_s   = box * scale
+            else:
+                img_s, pts_s, box_s = img, pts_sel, box
+
+            # ── SAM2 inference ────────────────────────────────────────────
+            with self._predictor_lock:
+                predictor.set_image(img_s)
+                with torch.inference_mode():
+                    masks_out, scores, _ = predictor.predict(
+                        point_coords=pts_s,
+                        point_labels=labels,
+                        box=box_s,
+                        multimask_output=True)
+
+            best_i = int(np.argmax(scores))
+            result = (masks_out[best_i] > 0.5).astype(np.uint8) * 255
+            if scale < 1.0:
+                result = cv2.resize(result, (W, H), interpolation=cv2.INTER_NEAREST)
+            result = _morpho_clean(result)
+
+            if self.orig_image and result.max() > 0:
+                m = self.masks[layer]
+                self.masks[layer]      = np.maximum(
+                    m if m is not None else result, result)
+                self.sam2_masks[layer] = result
+                area = int(np.sum(result > 0))
+
+                def _upd():
+                    # Keep scribble strokes visible so user knows what they painted
+                    self._rebuild_layer_buttons()
+                    self._render_canvas()
+                    self._update_status(
+                        f"Objeto selecionado\nLayer {layer+1} | {area:,}px"
+                        f" | score {scores[best_i]:.2f}\n"
+                        f"Pinte mais para refinar ou use Limpar para recomecar")
+                self.after(0, _upd)
+            else:
+                self._update_status(
+                    "Nenhum objeto identificado.\n"
+                    "Pinte mais sobre o objeto e aguarde.")
+
+        except Exception as ex:
+            _log('SCRIBBLE_SAM2', type(ex), ex, ex.__traceback__)
+            self.after(0, lambda: self._update_status(f"Erro: {ex}"))
+        finally:
+            self._sam2_running = False
 
     # ── Smart selection (SAM2 auto → depth-sorted layers) ──────────────────────
 
