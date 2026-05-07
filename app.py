@@ -191,6 +191,7 @@ class ParallaxStudio(ctk.CTk):
         self.tool         = "brush"
         self._brush_oval  = None
         self._thumb_refs  = []
+        self._lasso_pts   = []   # [(canvas_x, canvas_y), ...] while drawing
 
         # Models
         self._sam2_model     = None
@@ -289,7 +290,7 @@ class ParallaxStudio(ctk.CTk):
         tf.grid(row=r, column=0, padx=16, pady=3, sticky="w"); r += 1
         for val, lbl in [("brush", "Pincel"),
                          ("eraser", "Borracha"),
-                         ("magic", "Selecao por Objeto")]:
+                         ("lasso", "Contorno (Lasso)")]:
             ctk.CTkRadioButton(tf, text=lbl, variable=self.tool_var, value=val,
                                command=lambda v=val: setattr(self, 'tool', v)
                                ).pack(anchor="w", pady=1)
@@ -677,12 +678,14 @@ class ParallaxStudio(ctk.CTk):
     def _on_canvas_motion(self, e):
         cx = self.canvas.canvasx(e.x)
         cy = self.canvas.canvasy(e.y)
-        if self.tool == "magic":
-            r, outline, dash = 16, "#a855f7", ()
-        else:
-            r       = max(2, int(self.brush_size * self.zoom))
-            outline = "white" if self.tool == "brush" else "#ff6060"
-            dash    = (4, 4)
+        if self.tool == "lasso":
+            if self._brush_oval:
+                self.canvas.delete(self._brush_oval)
+                self._brush_oval = None
+            return
+        r       = max(2, int(self.brush_size * self.zoom))
+        outline = "white" if self.tool == "brush" else "#ff6060"
+        dash    = (4, 4)
         if self._brush_oval:
             self.canvas.coords(self._brush_oval, cx - r, cy - r, cx + r, cy + r)
             self.canvas.itemconfigure(self._brush_oval, outline=outline, dash=dash)
@@ -722,12 +725,18 @@ class ParallaxStudio(ctk.CTk):
     def _on_mouse_down(self, e):
         if self.orig_image is None or self._preprocessing_active:
             return
-        x, y = self._canvas_to_img(e.x, e.y)
-        if self.tool == "magic":
-            self._update_status("Identificando objeto...")
-            threading.Thread(target=self._magic_select, args=(x, y),
-                             daemon=True).start()
+        if self.tool == "lasso":
+            cx = self.canvas.canvasx(e.x)
+            cy = self.canvas.canvasy(e.y)
+            self._lasso_pts = [(cx, cy)]
+            self.canvas.delete("lasso")
+            m = self.masks[self.active_layer]
+            s = self.sam2_masks[self.active_layer]
+            if m is not None:
+                self._undo[self.active_layer] = (m.copy(), s.copy() if s is not None else None)
+            self.is_painting = True
             return
+        x, y = self._canvas_to_img(e.x, e.y)
         # Undo snapshot
         m = self.masks[self.active_layer]
         s = self.sam2_masks[self.active_layer]
@@ -741,6 +750,16 @@ class ParallaxStudio(ctk.CTk):
     def _on_mouse_drag(self, e):
         self._on_canvas_motion(e)
         if not self.is_painting or self._preprocessing_active:
+            return
+        if self.tool == "lasso":
+            cx = self.canvas.canvasx(e.x)
+            cy = self.canvas.canvasy(e.y)
+            if self._lasso_pts:
+                px, py = self._lasso_pts[-1]
+                self.canvas.create_line(px, py, cx, cy,
+                                        fill="#a855f7", width=2,
+                                        tags="lasso")
+            self._lasso_pts.append((cx, cy))
             return
         x, y = self._canvas_to_img(e.x, e.y)
         if self.last_x is not None:
@@ -758,6 +777,24 @@ class ParallaxStudio(ctk.CTk):
             return
         self.is_painting = False
         self.last_x = self.last_y = None
+        if self.tool == "lasso":
+            pts = self._lasso_pts
+            if len(pts) > 4:
+                # Close the lasso visually
+                fx, fy = pts[0]
+                lx, ly = pts[-1]
+                self.canvas.create_line(lx, ly, fx, fy,
+                                        fill="#a855f7", width=2, dash=(4, 2),
+                                        tags="lasso")
+                self._update_status("Contorno detectado — SAM2 refinando...")
+                layer = self.active_layer
+                threading.Thread(target=self._run_lasso_sam2,
+                                 args=(list(pts), layer),
+                                 daemon=True).start()
+            else:
+                self.canvas.delete("lasso")
+                self._lasso_pts = []
+            return
         self._render_canvas()
         # Schedule real-time SAM2 refinement (brush only, not eraser)
         if self.tool == "brush":
@@ -1132,84 +1169,98 @@ class ParallaxStudio(ctk.CTk):
         finally:
             self._sam2_running = False
 
-    # ── Magic select (click → whole object) ────────────────────────────────────
+    # ── Lasso select (rough circle → SAM2 precise mask) ───────────────────────
 
-    def _magic_select(self, img_x, img_y):
-        auto = self._auto_masks
-        if auto:
-            cands = [m for m in auto
-                     if (img_y < m['segmentation'].shape[0] and
-                         img_x < m['segmentation'].shape[1] and
-                         m['segmentation'][img_y, img_x] > 127)]
-            if cands:
-                best  = min(cands, key=lambda m: m['area'])
-                seg   = best['segmentation']
-                layer = self._depth_to_layer(best['cx'], best['cy'])
-                m     = self.masks[layer]
-                s     = self.sam2_masks[layer]
-                self._undo[layer] = (m.copy() if m is not None else None,
-                                     s.copy() if s is not None else None)
-                self.masks[layer]      = np.maximum(m if m is not None else seg, seg)
-                self.sam2_masks[layer] = np.maximum(s if s is not None else seg, seg)
-                if layer != self.active_layer:
-                    self.active_layer = layer
-                dv = (f" | prof:{self._depth_map[best['cy'],best['cx']]:.2f}"
-                      if self._depth_map is not None else "")
-                self.after(0, lambda: (self._rebuild_layer_buttons(), self._render_canvas()))
-                self._update_status(
-                    f"Objeto selecionado\nLayer {layer+1} | {best['area']:,}px{dv}")
-                return
-            self._update_status("Nenhum objeto neste ponto.\nTente outro local.")
-            return
+    def _clear_lasso_canvas(self):
+        self.canvas.delete("lasso")
+        self._lasso_pts = []
 
-        if auto is not None:   # ran but found nothing
-            self._update_status("Nenhum objeto encontrado.")
-            return
-
-        # Fallback: live point prediction
-        predictor = self._load_predictor()
-        if predictor is None or self.orig_image is None:
-            self._update_status("SAM2 indisponivel")
-            return
+    def _run_lasso_sam2(self, canvas_pts, layer):
         try:
+            if self.orig_image is None:
+                return
+            predictor = self._load_predictor()
+            if predictor is None:
+                self._update_status("SAM2 indisponivel")
+                self.after(0, self._clear_lasso_canvas)
+                return
+
             W, H  = self.orig_image.size
             ps    = int(self.proc_size_var.get())
             scale = min(1.0, ps / max(W, H))
             img   = np.array(self.orig_image.convert("RGB"))
+
+            # Convert canvas coords → image coords
+            img_pts = np.array([(int(cx / self.zoom), int(cy / self.zoom))
+                                 for cx, cy in canvas_pts], dtype=np.int32)
+            img_pts[:, 0] = np.clip(img_pts[:, 0], 0, W - 1)
+            img_pts[:, 1] = np.clip(img_pts[:, 1], 0, H - 1)
+
+            # Bounding box of the lasso
+            x0 = int(img_pts[:, 0].min())
+            y0 = int(img_pts[:, 1].min())
+            x1 = int(img_pts[:, 0].max())
+            y1 = int(img_pts[:, 1].max())
+
+            if x1 - x0 < 4 or y1 - y0 < 4:
+                self.after(0, self._clear_lasso_canvas)
+                self._update_status("Contorno muito pequeno")
+                return
+
+            # Interior mask from polygon → positive prompt points
+            lasso_mask = np.zeros((H, W), dtype=np.uint8)
+            cv2.fillPoly(lasso_mask, [img_pts], 255)
+            points, labels = _sample_points(lasso_mask, n=8)
+            if points is None:
+                points = np.array([[(x0+x1)//2, (y0+y1)//2]], dtype=np.float32)
+                labels = np.array([1], dtype=np.int32)
+
+            box = np.array([x0, y0, x1, y1], dtype=np.float32)
+
             if scale < 1.0:
-                img_s  = cv2.resize(img, (int(W*scale), int(H*scale)))
-                px, py = int(img_x * scale), int(img_y * scale)
+                img_s   = cv2.resize(img, (int(W * scale), int(H * scale)))
+                points  = points * scale
+                box     = box * scale
             else:
-                img_s, px, py = img, img_x, img_y
+                img_s = img
 
             with self._predictor_lock:
                 predictor.set_image(img_s)
                 with torch.inference_mode():
                     masks_out, scores, _ = predictor.predict(
-                        point_coords=np.array([[px, py]], dtype=np.float32),
-                        point_labels=np.array([1], dtype=np.int32),
+                        point_coords=points,
+                        point_labels=labels,
+                        box=box,
                         multimask_output=True)
 
-            best_i  = int(np.argmax(scores))
-            result  = (masks_out[best_i] > 0.5).astype(np.uint8) * 255
+            best_i = int(np.argmax(scores))
+            result = (masks_out[best_i] > 0.5).astype(np.uint8) * 255
             if scale < 1.0:
                 result = cv2.resize(result, (W, H), interpolation=cv2.INTER_NEAREST)
             result = _morpho_clean(result)
 
-            layer = self._depth_to_layer(img_x, img_y)
-            m = self.masks[layer]
-            s = self.sam2_masks[layer]
-            self._undo[layer] = (m.copy() if m is not None else None,
-                                 s.copy() if s is not None else None)
-            self.masks[layer]      = np.maximum(m if m is not None else result, result)
-            self.sam2_masks[layer] = np.maximum(s if s is not None else result, result)
-            if layer != self.active_layer:
-                self.active_layer = layer
-            self.after(0, lambda: (self._rebuild_layer_buttons(), self._render_canvas()))
-            self._update_status(
-                f"Selecionado (SAM2)\nLayer {layer+1} | score {scores[best_i]:.2f}")
-        except Exception as e:
-            self._update_status(f"SAM2 erro: {e}")
+            if self.orig_image and result.max() > 0:
+                m = self.masks[layer]
+                self.masks[layer]      = np.maximum(m if m is not None else result, result)
+                self.sam2_masks[layer] = result
+                area = int(np.sum(result > 0))
+
+                def _upd():
+                    self._clear_lasso_canvas()
+                    self._rebuild_layer_buttons()
+                    self._render_canvas()
+                    self._update_status(
+                        f"Lasso SAM2 pronto\nLayer {layer+1} | {area:,}px"
+                        f" | score {scores[best_i]:.2f}")
+                self.after(0, _upd)
+            else:
+                self.after(0, self._clear_lasso_canvas)
+                self._update_status("Nenhum objeto encontrado no contorno")
+
+        except Exception as ex:
+            _log('LASSO_SAM2', type(ex), ex, ex.__traceback__)
+            self.after(0, self._clear_lasso_canvas)
+            self.after(0, lambda: self._update_status(f"Lasso erro: {ex}"))
 
     # ── Smart selection (SAM2 auto → depth-sorted layers) ──────────────────────
 
