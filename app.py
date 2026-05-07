@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import torch
 import threading
+import traceback
 import os
 import sys
 import json
@@ -36,10 +37,38 @@ LAYER_COLORS = [
 ]
 
 try:
-    import windnd
-    _HAS_DND = True
+    import tkinterdnd2
+    _HAS_TKDND = True
 except ImportError:
-    _HAS_DND = False
+    _HAS_TKDND = False
+
+try:
+    import windnd
+    _HAS_WINDND = True
+except ImportError:
+    _HAS_WINDND = False
+
+CRASH_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'crash.log')
+
+def _log_exception(label, exc_type, exc_value, exc_tb):
+    try:
+        with open(CRASH_LOG, 'a', encoding='utf-8') as f:
+            f.write(f'\n{"="*60}\n[{label}]\n')
+            f.writelines(traceback.format_exception(exc_type, exc_value, exc_tb))
+    except Exception:
+        pass
+
+# Catch unhandled exceptions on main thread
+_orig_excepthook = sys.excepthook
+def _excepthook(t, v, tb):
+    _log_exception('MAIN', t, v, tb)
+    _orig_excepthook(t, v, tb)
+sys.excepthook = _excepthook
+
+# Catch unhandled exceptions on background threads
+def _thread_excepthook(args):
+    _log_exception(f'THREAD:{args.thread.name}', args.exc_type, args.exc_value, args.exc_tb)
+threading.excepthook = _thread_excepthook
 
 
 def _checkerboard(w, h, ts=10):
@@ -96,9 +125,7 @@ class ParallaxStudio(ctk.CTk):
 
         self._load_settings()
         self._build_ui()
-
-        if _HAS_DND:
-            windnd.hook_dropfiles(self, func=self._on_windnd_drop)
+        self._setup_dnd()
 
     # ── Persistence ────────────────────────────────────────────────────────────
 
@@ -339,26 +366,57 @@ class ParallaxStudio(ctk.CTk):
         self.num_layers = int(val)
         self._rebuild_layer_buttons()
 
+    # ── Drag-and-drop setup ────────────────────────────────────────────────────
+
+    def _setup_dnd(self):
+        """Register drag-and-drop. Prefers tkinterdnd2 (Tk-native); falls back to windnd."""
+        if _HAS_TKDND:
+            try:
+                tkinterdnd2.TkinterDnD._require(self)
+                self.canvas.drop_target_register(tkinterdnd2.DND_FILES)
+                self.canvas.dnd_bind('<<Drop>>', self._on_tkdnd_drop)
+                self._drop_hint.configure(
+                    text="📁  Arraste uma imagem aqui\nou use o botão Carregar Imagem")
+                return
+            except Exception as e:
+                _log_exception('DND_SETUP', type(e), e, e.__traceback__)
+
+        if _HAS_WINDND:
+            try:
+                windnd.hook_dropfiles(self, func=self._on_windnd_drop)
+            except Exception as e:
+                _log_exception('WINDND_SETUP', type(e), e, e.__traceback__)
+
+    def _on_tkdnd_drop(self, event):
+        """tkinterdnd2 drop handler — called on the main Tk thread, always safe."""
+        try:
+            paths = self.tk.splitlist(event.data)
+            if paths:
+                path = paths[0].strip().strip('"')
+                threading.Thread(target=self._load_image_bg, args=(path,), daemon=True).start()
+        except Exception as e:
+            _log_exception('TKDND_DROP', type(e), e, e.__traceback__)
+        return event.action
+
+    def _on_windnd_drop(self, files):
+        """windnd fallback — return immediately so WM_DROPFILES doesn't time out."""
+        try:
+            if not files:
+                return
+            raw  = files[0]
+            path = raw.decode('mbcs', errors='replace') if isinstance(raw, bytes) else str(raw)
+            threading.Thread(target=self._load_image_bg,
+                             args=(path.strip().strip('"'),), daemon=True).start()
+        except Exception as e:
+            _log_exception('WINDND_DROP', type(e), e, e.__traceback__)
+
     # ── Image loading ──────────────────────────────────────────────────────────
 
     def _browse_image(self):
         path = filedialog.askopenfilename(
             filetypes=[("Imagens", "*.png *.jpg *.jpeg *.webp *.bmp")])
         if path:
-            # Background thread so the dialog closes instantly before heavy PIL work
             threading.Thread(target=self._load_image_bg, args=(path,), daemon=True).start()
-
-    def _on_windnd_drop(self, files):
-        # Return immediately — WM_DROPFILES must not block or Windows kills the app
-        if not files:
-            return
-        try:
-            raw  = files[0]
-            path = raw.decode('mbcs', errors='replace') if isinstance(raw, bytes) else str(raw)
-            threading.Thread(target=self._load_image_bg,
-                             args=(path.strip().strip('"'),), daemon=True).start()
-        except Exception:
-            pass
 
     def _load_image_bg(self, path):
         """Open + decode image in a background thread; only touch UI via self.after()."""
