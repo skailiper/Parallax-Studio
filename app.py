@@ -849,11 +849,7 @@ class ParallaxStudio(ctk.CTk):
                 self._schedule_scribble_sam2(self.active_layer)
             return
         self._render_canvas()
-        # Schedule real-time SAM2 refinement (brush only, not eraser)
-        if self.tool == "brush":
-            m = self.masks[self.active_layer]
-            if m is not None and m.max() > 0:
-                self._schedule_sam2_refine(self.active_layer)
+        # Brush and eraser just paint — no SAM2 auto-refine
 
     def _on_canvas_enter(self, e):
         if (e.state & 0x100 and self.orig_image is not None
@@ -1511,33 +1507,78 @@ class ParallaxStudio(ctk.CTk):
             self._apply_auto_to_layers()
 
     def _apply_auto_to_layers(self):
+        """
+        Distribui objetos detectados em camadas por profundidade:
+          Layer 0 = frente (mais perto)
+          Layer 1 = meio
+          Layer N-1 = fundo (mais longe)
+        Se não houver depth map, usa area (maior = fundo).
+        """
         if not self._auto_masks or self.orig_image is None:
             return
         W, H     = self.orig_image.size
         total_px = W * H
+        n        = self.num_layers
+
         valid = [m for m in self._auto_masks
-                 if 0.002 * total_px < m['area'] < 0.80 * total_px]
-        if self._depth_map is not None:
-            valid.sort(key=lambda m: self._mask_mean_depth(m['segmentation']), reverse=True)
-        else:
-            valid.sort(key=lambda m: m['area'], reverse=True)
-        n = min(len(valid), self.num_layers)
+                 if 0.001 * total_px < m['area'] < 0.88 * total_px]
+
+        # Reset todas as camadas
         for i in range(n):
-            seg = valid[i]['segmentation']
-            if seg.shape != (H, W):
-                seg = cv2.resize(seg, (W, H), interpolation=cv2.INTER_NEAREST)
-            self.masks[i]      = seg
-            self.sam2_masks[i] = seg     # already SAM2-generated, no need to re-run
-        for i in range(n, self.num_layers):
             if self.masks[i] is not None:
                 self.masks[i][:] = 0
             self.sam2_masks[i] = None
 
+        if not valid:
+            self.after(0, lambda: self._update_status("Nenhum objeto encontrado"))
+            return
+
+        if self._depth_map is not None:
+            # Atribui profundidade média a cada máscara
+            for m in valid:
+                m['_d'] = self._mask_mean_depth(m['segmentation'])
+
+            depths = [m['_d'] for m in valid]
+            d_min, d_max = min(depths), max(depths)
+            d_range = max(d_max - d_min, 1e-4)
+
+            # Agrupa por faixa de profundidade em N buckets
+            # d=1.0 (perto) → layer 0 (frente)
+            # d=0.0 (longe) → layer n-1 (fundo)
+            buckets = [np.zeros((H, W), dtype=np.uint8) for _ in range(n)]
+            for m in valid:
+                rel = (m['_d'] - d_min) / d_range  # 0=mais longe, 1=mais perto
+                idx = min(n - 1, int((1.0 - rel) * n))  # 0=frente, n-1=fundo
+                seg = m['segmentation']
+                if seg.shape != (H, W):
+                    seg = cv2.resize(seg, (W, H), interpolation=cv2.INTER_NEAREST)
+                buckets[idx] = np.maximum(buckets[idx], seg)
+
+            for i in range(n):
+                self.masks[i]      = buckets[i]
+                self.sam2_masks[i] = buckets[i] if buckets[i].max() > 0 else None
+
+            filled = sum(1 for b in buckets if b.max() > 0)
+            method = f"depth map ({filled}/{n} camadas)"
+        else:
+            # Sem depth map: ordena por área, maior = fundo
+            valid.sort(key=lambda m: m['area'], reverse=True)
+            for i in range(min(len(valid), n)):
+                seg = valid[i]['segmentation']
+                if seg.shape != (H, W):
+                    seg = cv2.resize(seg, (W, H), interpolation=cv2.INTER_NEAREST)
+                idx = n - 1 - i  # maior área vai para o fundo
+                idx = max(0, min(n - 1, idx))
+                self.masks[i]      = seg
+                self.sam2_masks[i] = seg
+            method = "area (sem depth map)"
+
         def _upd():
             self._rebuild_layer_buttons()
             self._render_canvas()
-            method = "profundidade" if self._depth_map is not None else "area"
-            self._update_status(f"{n} elementos aplicados\npor {method}")
+            self._update_status(
+                f"Camadas distribuidas\npor {method}\n"
+                f"Layer 1=frente  Layer {n}=fundo")
         self.after(0, _upd)
 
     # ── Depth map toggle ───────────────────────────────────────────────────────
