@@ -194,6 +194,7 @@ class ParallaxStudio(ctk.CTk):
         self._lasso_pts    = []   # [(canvas_x, canvas_y), ...] while drawing lasso
         self._scribble_pts = []   # [(img_x, img_y), ...] accumulated across strokes
         self._scribble_job = None # after() id for debounced SAM2
+        self._last_render_t = 0.0 # monotonic time of last fast render (throttle)
 
         # Models
         self._sam2_model     = None
@@ -628,21 +629,31 @@ class ParallaxStudio(ctk.CTk):
     # ── Canvas rendering ───────────────────────────────────────────────────────
 
     def _effective_mask(self, i):
-        """SAM2 mask if ready, otherwise raw painted."""
+        """Union of SAM2 + painted masks so brush strokes are always visible."""
         s = self.sam2_masks[i]
+        m = self.masks[i]
         if s is not None and s.max() > 0:
+            if m is not None and m.max() > 0:
+                return np.maximum(s, m)
             return s
-        return self.masks[i]
+        return m
 
     def _render_canvas(self, fast=False):
         if not self.orig_image:
             return
+        # Throttle fast/paint renders to ~30 fps
+        if fast:
+            now = time.monotonic()
+            if now - self._last_render_t < 0.033:
+                return
+            self._last_render_t = now
+
         W, H = self.orig_image.size
         dw = max(1, int(W * self.zoom))
         dh = max(1, int(H * self.zoom))
 
         z_key = self.zoom
-        if z_key not in self._base_cache or fast:
+        if z_key not in self._base_cache:
             src = self.orig_image
             if self._show_depth and self._depth_map is not None:
                 d8   = (self._depth_map * 255).astype(np.uint8)
@@ -653,8 +664,7 @@ class ParallaxStudio(ctk.CTk):
                     drgb = cv2.resize(drgb, (W, H))
                 blended = (orig * 0.45 + drgb * 0.55).astype(np.uint8)
                 src = Image.fromarray(blended).convert("RGBA")
-            interp   = Image.BILINEAR if fast else Image.LANCZOS
-            base_pil = src.resize((dw, dh), interp)
+            base_pil = src.resize((dw, dh), Image.BILINEAR if fast else Image.LANCZOS)
             if not fast:
                 self._base_cache = {z_key: base_pil}
         else:
@@ -668,7 +678,7 @@ class ParallaxStudio(ctk.CTk):
             mr = cv2.resize(m, (dw, dh),
                             interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
             rv, gv, bv, _ = LAYER_COLORS[i]
-            alpha = mr * 0.50
+            alpha = mr * 0.52
             arr[:, :, 0] = arr[:, :, 0] * (1 - alpha) + rv * alpha
             arr[:, :, 1] = arr[:, :, 1] * (1 - alpha) + gv * alpha
             arr[:, :, 2] = arr[:, :, 2] * (1 - alpha) + bv * alpha
@@ -847,7 +857,8 @@ class ParallaxStudio(ctk.CTk):
 
     def _on_canvas_enter(self, e):
         if (e.state & 0x100 and self.orig_image is not None
-                and not self._preprocessing_active):
+                and not self._preprocessing_active
+                and self.tool in ("brush", "eraser")):
             self.is_painting = True
 
     def _on_brush_change(self, val):
@@ -874,9 +885,13 @@ class ParallaxStudio(ctk.CTk):
                 self.masks[self.active_layer][:] = painted_snap
             self.sam2_masks[self.active_layer] = sam2_snap
             self._undo[self.active_layer] = None
+            # Clear any in-progress scribble
+            self._scribble_pts = []
+            self.canvas.delete("scribble")
+            self.canvas.delete("lasso")
             self._rebuild_layer_buttons()
             self._render_canvas()
-            self._update_status("Desfeito")
+            self._update_status("Desfeito (Ctrl+Z)")
 
     # ── Output dir ─────────────────────────────────────────────────────────────
 
@@ -939,13 +954,13 @@ class ParallaxStudio(ctk.CTk):
             from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
             self._sam2_auto_gen = SAM2AutomaticMaskGenerator(
                 self._sam2_model,
-                points_per_side=24,
-                pred_iou_thresh=0.78,
-                stability_score_thresh=0.85,
-                min_mask_region_area=1200,
-                box_nms_thresh=0.65,
+                points_per_side=32,        # mais pontos = mais objetos encontrados
+                pred_iou_thresh=0.72,      # mais permissivo = pega mais elementos
+                stability_score_thresh=0.80,
+                min_mask_region_area=350,  # objetos/animais menores
+                box_nms_thresh=0.70,
                 crop_n_layers=1,
-                crop_overlap_ratio=0.4,
+                crop_overlap_ratio=0.35,
             )
             return self._sam2_auto_gen
         except Exception as e:
@@ -999,22 +1014,21 @@ class ParallaxStudio(ctk.CTk):
         sam2_result  = []
         depth_result = [None]
 
-        # 2a. SAM2 auto-segmentation thread
+        # 2a. SAM2 auto-segmentation — sempre a 512px para ser rápido
         def run_sam2():
             self._overlay_show("", "Identificando objetos...",
-                               "SAM2: segmentando elementos da imagem...", 0.20)
+                               "SAM2: pessoas, animais, elementos...", 0.20)
             gen = self._load_auto_gen()
             if gen is None or src is not self.orig_image:
                 return
             try:
                 img_rgb = np.array(src.convert("RGB"))
                 H, W    = img_rgb.shape[:2]
-                ps      = int(self.proc_size_var.get())
-                scale   = min(1.0, ps / max(W, H))
+                scale   = min(1.0, 512 / max(W, H))   # fixo 512px para velocidade
                 small   = (cv2.resize(img_rgb, (int(W * scale), int(H * scale)))
                            if scale < 1.0 else img_rgb)
                 self._overlay_show("", "SAM2 analisando...",
-                                   f"Resolucao: {small.shape[1]}x{small.shape[0]}px", 0.28)
+                                   f"Segmentando {small.shape[1]}x{small.shape[0]}px...", 0.28)
                 with torch.inference_mode():
                     raw = gen.generate(small)
                 full = []
@@ -1028,39 +1042,54 @@ class ParallaxStudio(ctk.CTk):
                     cy = int(ys.mean()) if len(ys) > 0 else H // 2
                     full.append({'segmentation': seg, 'area': area, 'cx': cx, 'cy': cy})
                 self._overlay_show("", "Unindo segmentos...",
-                                   "Combinando partes em objetos inteiros...", 0.40)
+                                   "Combinando partes em objetos completos...", 0.42)
                 full = self._merge_masks(full)
                 sam2_result.extend(full)
                 self._overlay_show("", "Objetos identificados",
-                                   f"{len(full)} elementos encontrados", 0.50)
+                                   f"{len(full)} elementos encontrados", 0.55)
             except Exception as e:
                 _log('SAM2_AUTO', type(e), e, e.__traceback__)
 
-        # 2b. ZoeDepth thread
+        # 2b. Depth map: tenta ZoeDepth, fallback para luminancia invertida
         def run_depth():
             self._overlay_show("", "Calculando profundidade...",
-                               "ZoeDepth: mapa de distancia real...", 0.55)
-            model = self._load_zoedepth()
-            if model is None or src is not self.orig_image:
+                               "Analisando distancias na cena...", 0.60)
+            if src is not self.orig_image:
                 return
+            # Tenta ZoeDepth
             try:
-                pil = src.convert("RGB")
-                with torch.inference_mode():
-                    depth = model.infer_pil(pil)
-                if isinstance(depth, torch.Tensor):
-                    depth = depth.squeeze().cpu().numpy()
-                mn, mx = float(depth.min()), float(depth.max())
-                norm   = (depth - mn) / max(mx - mn, 1e-6)
-                depth_result[0] = norm.astype(np.float32)
-                self._overlay_show("", "Profundidade calculada",
-                                   "ZoeDepth: mapa metrico pronto", 0.85)
+                model = self._load_zoedepth()
+                if model is not None:
+                    pil = src.convert("RGB")
+                    with torch.inference_mode():
+                        depth = model.infer_pil(pil)
+                    if isinstance(depth, torch.Tensor):
+                        depth = depth.squeeze().cpu().numpy()
+                    mn, mx = float(depth.min()), float(depth.max())
+                    depth_result[0] = ((depth - mn) / max(mx - mn, 1e-6)).astype(np.float32)
+                    self._overlay_show("", "Profundidade calculada",
+                                       "ZoeDepth: mapa metrico pronto", 0.88)
+                    return
             except Exception as e:
-                _log('DEPTH', type(e), e, e.__traceback__)
+                _log('DEPTH_ZOE', type(e), e, e.__traceback__)
+            # Fallback: luminancia invertida (claro=longe, escuro=perto)
+            try:
+                rgb  = np.array(src.convert("RGB"))
+                gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+                smooth = cv2.GaussianBlur(gray, (0, 0),
+                                          sigmaX=max(1, gray.shape[1] // 30))
+                norm = smooth / 255.0
+                depth_result[0] = (1.0 - norm).astype(np.float32)
+                self._overlay_show("", "Depth map (aproximado)",
+                                   "ZoeDepth indisponivel — usando estimativa rapida", 0.88)
+            except Exception as e:
+                _log('DEPTH_FALLBACK', type(e), e, e.__traceback__)
 
+        # Roda SAM2 primeiro, depois depth (evita conflito de memoria GPU)
         t1 = threading.Thread(target=run_sam2,  daemon=True)
+        t1.start(); t1.join()
         t2 = threading.Thread(target=run_depth, daemon=True)
-        t1.start(); t2.start()
-        t1.join();  t2.join()
+        t2.start(); t2.join()
 
         if src is self.orig_image:
             self._auto_masks = sam2_result         # [] = ran, found nothing
@@ -1220,6 +1249,22 @@ class ParallaxStudio(ctk.CTk):
         self.canvas.delete("lasso")
         self._lasso_pts = []
 
+    @staticmethod
+    def _bg_neg_points(W, H, x0, y0, x1, y1):
+        """Background negative prompt points placed outside subject bounding box."""
+        pts = []
+        cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+        # Sides outside the box
+        if x0 > W * 0.08:   pts.append([max(0, x0 // 2),              cy])
+        if x1 < W * 0.92:   pts.append([min(W-1, x1 + (W-x1)//2),    cy])
+        if y0 > H * 0.08:   pts.append([cx, max(0, y0 // 2)])
+        if y1 < H * 0.92:   pts.append([cx, min(H-1, y1 + (H-y1)//2)])
+        # Corners far from box
+        for px, py in [(4, 4), (W-5, 4), (4, H-5), (W-5, H-5)]:
+            if abs(px - cx) > W * 0.25 or abs(py - cy) > H * 0.25:
+                pts.append([px, py])
+        return np.array(pts[:6], dtype=np.float32) if pts else None
+
     def _run_lasso_sam2(self, canvas_pts, layer):
         try:
             if self.orig_image is None:
@@ -1241,7 +1286,6 @@ class ParallaxStudio(ctk.CTk):
             img_pts[:, 0] = np.clip(img_pts[:, 0], 0, W - 1)
             img_pts[:, 1] = np.clip(img_pts[:, 1], 0, H - 1)
 
-            # Bounding box of the lasso
             x0 = int(img_pts[:, 0].min())
             y0 = int(img_pts[:, 1].min())
             x1 = int(img_pts[:, 0].max())
@@ -1252,20 +1296,34 @@ class ParallaxStudio(ctk.CTk):
                 self._update_status("Contorno muito pequeno")
                 return
 
-            # Interior mask from polygon → positive prompt points
+            # Positive: interior polygon points
             lasso_mask = np.zeros((H, W), dtype=np.uint8)
             cv2.fillPoly(lasso_mask, [img_pts], 255)
-            points, labels = _sample_points(lasso_mask, n=8)
-            if points is None:
-                points = np.array([[(x0+x1)//2, (y0+y1)//2]], dtype=np.float32)
-                labels = np.array([1], dtype=np.int32)
+            pos_pts, pos_lbl = _sample_points(lasso_mask, n=10)
+            if pos_pts is None:
+                pos_pts = np.array([[(x0+x1)//2, (y0+y1)//2]], dtype=np.float32)
+                pos_lbl = np.array([1], dtype=np.int32)
 
-            box = np.array([x0, y0, x1, y1], dtype=np.float32)
+            # Negative: background points outside the contour
+            neg_pts = self._bg_neg_points(W, H, x0, y0, x1, y1)
+            if neg_pts is not None:
+                all_pts = np.vstack([pos_pts, neg_pts])
+                all_lbl = np.concatenate([pos_lbl,
+                                          np.zeros(len(neg_pts), dtype=np.int32)])
+            else:
+                all_pts, all_lbl = pos_pts, pos_lbl
+
+            # Box with 15% padding to capture whole object
+            pad_x = max(16, int((x1 - x0) * 0.15))
+            pad_y = max(16, int((y1 - y0) * 0.15))
+            box = np.array([max(0, x0-pad_x), max(0, y0-pad_y),
+                            min(W-1, x1+pad_x), min(H-1, y1+pad_y)],
+                           dtype=np.float32)
 
             if scale < 1.0:
-                img_s   = cv2.resize(img, (int(W * scale), int(H * scale)))
-                points  = points * scale
-                box     = box * scale
+                img_s    = cv2.resize(img, (int(W * scale), int(H * scale)))
+                all_pts  = all_pts * scale
+                box      = box * scale
             else:
                 img_s = img
 
@@ -1273,8 +1331,8 @@ class ParallaxStudio(ctk.CTk):
                 predictor.set_image(img_s)
                 with torch.inference_mode():
                     masks_out, scores, _ = predictor.predict(
-                        point_coords=points,
-                        point_labels=labels,
+                        point_coords=all_pts,
+                        point_labels=all_lbl,
                         box=box,
                         multimask_output=True)
 
@@ -1363,22 +1421,32 @@ class ParallaxStudio(ctk.CTk):
             pts_sel = arr[idx].astype(np.float32)   # (N, 2) x,y
             labels  = np.ones(len(pts_sel), dtype=np.int32)
 
-            # Bounding box with 8% padding
-            x0, y0 = int(arr[:, 0].min()), int(arr[:, 1].min())
-            x1, y1 = int(arr[:, 0].max()), int(arr[:, 1].max())
-            pad_x = max(12, int((x1 - x0) * 0.08))
-            pad_y = max(12, int((y1 - y0) * 0.08))
-            x0 = max(0,     x0 - pad_x);  y0 = max(0,     y0 - pad_y)
-            x1 = min(W - 1, x1 + pad_x);  y1 = min(H - 1, y1 + pad_y)
-            box = np.array([x0, y0, x1, y1], dtype=np.float32)
+            # Bounding box with 15% padding to capture whole object
+            x0r, y0r = int(arr[:, 0].min()), int(arr[:, 1].min())
+            x1r, y1r = int(arr[:, 0].max()), int(arr[:, 1].max())
+            pad_x = max(16, int((x1r - x0r) * 0.15))
+            pad_y = max(16, int((y1r - y0r) * 0.15))
+            bx0 = max(0,     x0r - pad_x);  by0 = max(0,     y0r - pad_y)
+            bx1 = min(W - 1, x1r + pad_x);  by1 = min(H - 1, y1r + pad_y)
+            box = np.array([bx0, by0, bx1, by1], dtype=np.float32)
+
+            # Negative background points outside the painted region
+            neg_pts = self._bg_neg_points(W, H, bx0, by0, bx1, by1)
+            if neg_pts is not None:
+                all_pts = np.vstack([pts_sel, neg_pts])
+                all_lbl = np.concatenate([labels,
+                                          np.zeros(len(neg_pts), dtype=np.int32)])
+            else:
+                all_pts, all_lbl = pts_sel, labels
 
             # ── Scale to processing resolution ────────────────────────────
             if scale < 1.0:
-                img_s   = cv2.resize(img, (int(W * scale), int(H * scale)))
-                pts_s   = pts_sel * scale
-                box_s   = box * scale
+                img_s    = cv2.resize(img, (int(W * scale), int(H * scale)))
+                pts_s    = all_pts * scale
+                box_s    = box * scale
             else:
-                img_s, pts_s, box_s = img, pts_sel, box
+                img_s, pts_s, box_s = img, all_pts, box
+            all_lbl_s = all_lbl  # labels don't scale
 
             # ── SAM2 inference ────────────────────────────────────────────
             with self._predictor_lock:
@@ -1386,7 +1454,7 @@ class ParallaxStudio(ctk.CTk):
                 with torch.inference_mode():
                     masks_out, scores, _ = predictor.predict(
                         point_coords=pts_s,
-                        point_labels=labels,
+                        point_labels=all_lbl_s,
                         box=box_s,
                         multimask_output=True)
 
